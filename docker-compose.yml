@@ -1,0 +1,15 @@
+services:
+  scraper:
+    build: .
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    # Importante para que Puppeteer funcione correctamente
+    security_opt:
+      - seccomp:unconfined
+    shm_size: '2gb'
