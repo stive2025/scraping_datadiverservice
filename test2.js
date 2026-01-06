@@ -21,11 +21,7 @@ async function getData({response,url,endpoint}){
     }
 }
 
-
-
 async function search(data,page,name,token) {
-    
-
     return JSON.stringify(data);
 }
 
@@ -36,8 +32,22 @@ let browser;
 let userCount = 0;
 
 (async () => {
-    browser = await puppeteer.launch({ headless: false });
-    const page = await browser.newPage();    
+    // Configuración para Docker/Linux
+    browser = await puppeteer.launch({ 
+        headless: "new",
+        executablePath: '/usr/bin/chromium',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
+    });
+    const page = await browser.newPage();
+    console.log('Browser iniciado correctamente');
 })();
 
 // Crear nueva sesión al acceder a /session
@@ -48,16 +58,16 @@ app.get('/title/:name', async (req, res) => {
     const userId = `user${++userCount}`;
 
     let data={
-    info_general:{},
-    info_contacts:{},
-    info_vehicles:{},
-    info_labour:{},
-    info_property:{},
-    info_favorities:{},
-    info_family:{}
-};
+        info_general:{},
+        info_contacts:{},
+        info_vehicles:{},
+        info_labour:{},
+        info_property:{},
+        info_favorities:{},
+        info_family:{}
+    };
 
-     page.on('response', async (response) => {
+    page.on('response', async (response) => {
         const url = response.url();
         const status = response.status();
         console.log(response)
@@ -97,10 +107,10 @@ app.get('/title/:name', async (req, res) => {
     if(token==''){
         await page.goto("https://datadiverservice.com/consultation/search",{waitUntil: 'load', timeout: 0})
         await page.goto("https://datadiverservice.com/auth/login",{waitUntil: 'load', timeout: 0});
-    await page.type('input#mat-input-0','GESTOR3@SEFILSA')
-    await page.type('input#mat-input-1','SEFILSA.G3')
-    await page.click("button#kt_login_signin_submit");
-    await delay(5000);
+        await page.type('input#mat-input-0','GESTOR3@SEFILSA')
+        await page.type('input#mat-input-1','SEFILSA.G3')
+        await page.click("button#kt_login_signin_submit");
+        await delay(5000);
     }
 
     await page.goto(`https://datadiverservice.com/consultation/${req.params.name}/client`,{waitUntil: 'load', timeout: 0});
@@ -163,6 +173,6 @@ app.get('/shutdown', async (req, res) => {
   process.exit();
 });
 
-app.listen(port, () => {
-  console.log(`Servidor Express escuchando en http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Servidor Express escuchando en http://0.0.0.0:${port}`);
 });
