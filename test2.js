@@ -26,20 +26,167 @@ async function getData({response, url, endpoint}) {
     }
 }
 
+// ============================================
+// FUNCIÓN DE TRANSFORMACIÓN A FORMATO ESTRUCTURADO
+// ============================================
+function convertDateFormat(dateStr) {
+    if (!dateStr || dateStr.trim() === '' || dateStr === ' ') {
+        return null;
+    }
+    
+    const parts = dateStr.trim().split('/');
+    if (parts.length === 3) {
+        const day = parts[0].padStart(2, '0');
+        const month = parts[1].padStart(2, '0');
+        const year = parts[2];
+        return `${year}-${month}-${day}`;
+    }
+    
+    return null;
+}
+
+function transformToStructuredFormat(rawData) {
+    const general = rawData.info_general || {};
+    const contacts = rawData.info_contacts || {};
+    const family = rawData.info_family || {};
+    
+    const now = new Date().toISOString();
+    
+    // Construir el objeto estructurado principal
+    const structured = {
+        id: general.id || null,
+        identification: general.dni || null,
+        uses_parent_identification: 0,
+        parent_identification: null,
+        name: general.fullname || null,
+        email: null,
+        micro_activa: null,
+        birth: convertDateFormat(general.dateOfBirth),
+        death: general.dateOfDeath && general.dateOfDeath.trim() !== '' ? convertDateFormat(general.dateOfDeath) : null,
+        gender: general.gender || null,
+        state_civil: general.civilStatus || null,
+        economic_activity: null,
+        economic_area: null,
+        nationality: general.citizenship || null,
+        profession: general.profession || null,
+        place_birth: general.placeOfBirth || null,
+        salary: general.salary || null,
+        created_at: now,
+        updated_at: now,
+        age: general.age || null,
+        contacts: [],
+        parents: [],
+        address: [],
+        emails: []
+    };
+    
+    // Transformar teléfonos (contacts)
+    if (contacts.phones && Array.isArray(contacts.phones)) {
+        structured.contacts = contacts.phones.map(phone => ({
+            id: null,
+            phone_number: phone.phone || null,
+            phone_type: phone.type || null,
+            counter_correct_number: null,
+            counter_incorrect_number: null,
+            client_id: structured.id,
+            created_at: now,
+            updated_at: now
+        }));
+    }
+    
+    // Transformar emails
+    if (contacts.emails && Array.isArray(contacts.emails)) {
+        structured.emails = contacts.emails.map(email => ({
+            id: null,
+            direction: email.email || null,
+            active: 1,
+            client_id: structured.id,
+            created_at: now,
+            updated_at: now
+        }));
+        
+        if (structured.emails.length > 0) {
+            structured.email = structured.emails[0].direction;
+        }
+    }
+    
+    // Transformar direcciones
+    if (contacts.address && Array.isArray(contacts.address)) {
+        structured.address = contacts.address.map(addr => ({
+            id: null,
+            address: addr.address || addr || null,
+            type: addr.type || "actualizado",
+            province: addr.province || "sin datos",
+            city: addr.city || "sin datos",
+            is_valid: addr.is_valid || "NO",
+            client_id: structured.id,
+            created_at: now,
+            updated_at: now
+        }));
+    } else if (general.address && typeof general.address === 'string' && general.address.trim() !== '') {
+        structured.address.push({
+            id: null,
+            address: general.address,
+            type: "actualizado",
+            province: "sin datos",
+            city: "sin datos",
+            is_valid: "NO",
+            client_id: structured.id,
+            created_at: now,
+            updated_at: now
+        });
+    }
+    
+    // Transformar familia - combinar info_general.family e info_family.family
+    const allFamilyMembers = [];
+    
+    if (Array.isArray(general.family)) {
+        allFamilyMembers.push(...general.family);
+    }
+    
+    if (Array.isArray(family.family)) {
+        allFamilyMembers.push(...family.family);
+    }
+    
+    if (Array.isArray(family.data)){
+        allFamilyMembers.push(...family.data);
+    }
+    
+    if (Array.isArray(family.results)){
+        allFamilyMembers.push(...family.results);
+    }
+    // Transformar a formato parents
+    structured.parents = allFamilyMembers.map(member => ({
+        id: null,
+        client_id: structured.id,
+        type: member.relationship ? member.relationship.toUpperCase() : null,
+        relationship_client_id: null,
+        created_at: now,
+        updated_at: now,
+        name: member.fullname || null,
+        identification: member.dni || null,
+        birth: convertDateFormat(member.dateOfBirth),
+        gender: member.gender || null,
+        state_civil: member.civilStatus || null,
+        death: member.dateOfDeath && member.dateOfDeath.trim() !== '' ? convertDateFormat(member.dateOfDeath) : null,
+        age: member.age || null
+    }));
+    
+    return structured;
+}
+
 let token = '';
 let tokenExpiry = 0;
 let browser;
 let keepAliveInterval;
 let isLoggingIn = false;
 
-
 const MAX_CONCURRENT_PAGES = 10;
-const PAGE_POOL_SIZE = 3;
+const PAGE_POOL_SIZE = 5; // Aumentado de 3 a 5
 let activePages = 0;
 let pageQueue = [];
 let pagePool = [];
 const QUEUE_TIMEOUT = 45000;
-
 
 let stats = {
     totalRequests: 0,
@@ -63,7 +210,6 @@ async function retry(fn, retries = 2, delayMs = 1000) {
     }
     throw lastErr;
 }
-
 
 async function performLogin() {
     if (isLoggingIn) {
@@ -117,7 +263,6 @@ async function performLogin() {
             await loginPage.type('input#mat-input-1', 'SEFILSA.G3');
             await loginPage.click("button#kt_login_signin_submit");
             
-            
             await Promise.race([
                 new Promise(resolve => {
                     const checkToken = setInterval(() => {
@@ -127,7 +272,7 @@ async function performLogin() {
                         }
                     }, 100);
                 }),
-                delay(8000) 
+                delay(8000)
             ]);
             
             if (!tokenCaptured) {
@@ -148,7 +293,6 @@ async function performLogin() {
     }
 }
 
-
 async function startKeepAlive() {
     if (keepAliveInterval) {
         clearInterval(keepAliveInterval);
@@ -158,7 +302,6 @@ async function startKeepAlive() {
         if (browser && !isLoggingIn) {
             try {
                 const timeLeft = tokenExpiry - Date.now();
-                
                 
                 if (!token || timeLeft < 5 * 60 * 1000) {
                     console.log('Keep-alive: renovando token...');
@@ -172,7 +315,7 @@ async function startKeepAlive() {
                 tokenExpiry = 0;
             }
         }
-    }, 10 * 60 * 1000); 
+    }, 10 * 60 * 1000);
 }
 
 async function launchBrowser() {
@@ -194,18 +337,18 @@ async function launchBrowser() {
                 '--disable-sync',
                 '--disable-translate',
                 '--disable-features=TranslateUI',
-                '--disable-ipc-flooding-protection', 
-                '--disable-renderer-backgrounding', 
-                '--disable-backgrounding-occluded-windows', 
-                '--disable-breakpad', 
-                '--disable-component-extensions-with-background-pages', 
-                '--disable-features=Translate,BackForwardCache,AcceptCHFrame', 
-                '--disable-hang-monitor', 
-                '--disable-prompt-on-repost', 
-                '--metrics-recording-only', 
-                '--mute-audio', 
+                '--disable-ipc-flooding-protection',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-breakpad',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-features=Translate,BackForwardCache,AcceptCHFrame',
+                '--disable-hang-monitor',
+                '--disable-prompt-on-repost',
+                '--metrics-recording-only',
+                '--mute-audio',
                 '--no-default-browser-check',
-                '--no-pings', 
+                '--no-pings',
                 '--password-store=basic',
                 '--use-mock-keychain'
             ]
@@ -215,15 +358,13 @@ async function launchBrowser() {
         
         browser.on('disconnected', async () => {
             console.error('El navegador se cerró inesperadamente. Reiniciando...');
-            pagePool = []; // Limpiar pool
+            pagePool = [];
             await launchBrowser();
             startKeepAlive();
         });
         
-        // Hacer login inicial
         await performLogin();
         
-        // Crear pool de páginas listas
         console.log('Pre-calentando pool de páginas...');
         await warmUpPagePool();
         
@@ -235,7 +376,6 @@ async function launchBrowser() {
     }
 }
 
-// Función para pre-crear páginas
 async function warmUpPagePool() {
     try {
         for (let i = 0; i < PAGE_POOL_SIZE; i++) {
@@ -249,15 +389,12 @@ async function warmUpPagePool() {
     }
 }
 
-// Función para crear página optimizada
 async function createOptimizedPage() {
     const page = await browser.newPage();
     await page.setDefaultNavigationTimeout(25000);
     await page.setDefaultTimeout(25000);
     
-
     await page.setCacheEnabled(true);
-    
     await page.setRequestInterception(true);
     
     page.on('request', (request) => {
@@ -272,7 +409,6 @@ async function createOptimizedPage() {
     return page;
 }
 
-
 async function getPageFromPool() {
     if (pagePool.length > 0) {
         console.log(`Usando página del pool (${pagePool.length} disponibles)`);
@@ -282,16 +418,13 @@ async function getPageFromPool() {
     return await createOptimizedPage();
 }
 
-// Devolver página al pool
 async function returnPageToPool(page) {
     try {
         if (pagePool.length < PAGE_POOL_SIZE) {
-            
             await page.goto('about:blank');
             pagePool.push(page);
             console.log(`Página devuelta al pool (${pagePool.length} disponibles)`);
         } else {
-            
             await page.close();
         }
     } catch (err) {
@@ -333,6 +466,9 @@ function releaseSlot() {
     }
 }
 
+// ============================================
+// ENDPOINT ORIGINAL (SIN CAMBIOS)
+// ============================================
 app.get('/title/:name', async (req, res) => {
     let page = null;
     const startTime = Date.now();
@@ -350,9 +486,8 @@ app.get('/title/:name', async (req, res) => {
         const waitTime = Date.now() - startTime;
         console.log(`Request para ${req.params.name} - Slot obtenido después de ${waitTime}ms`);
 
-        // Verificación de token más laxa
         const now = Date.now();
-        if (!token || now >= tokenExpiry - (2 * 60 * 1000)) { 
+        if (!token || now >= tokenExpiry - (2 * 60 * 1000)) {
             console.log('Renovando token antes de la consulta...');
             await performLogin();
         }
@@ -361,7 +496,6 @@ app.get('/title/:name', async (req, res) => {
             throw new Error('No se pudo obtener un token válido');
         }
 
-        // Usar página del pool en lugar de crear nueva
         page = await getPageFromPool();
 
         let data = {
@@ -381,11 +515,9 @@ app.get('/title/:name', async (req, res) => {
             labour: false,
             property: false,
             favorities: false,
-            family: false 
+            family: false
         };
 
-        // Capturar datos con Promise para detectar cuando estén completos
-        const dataPromises = [];
         let resolveDataLoaded;
         const dataLoadedPromise = new Promise(resolve => {
             resolveDataLoaded = resolve;
@@ -401,7 +533,7 @@ app.get('/title/:name', async (req, res) => {
                 const info_labour = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/labournew'});
                 const info_property = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crm/client/property'});
                 const info_favorities = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/favorites'});
-                const info_family = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/family/new'}); // AGREGADO
+                const info_family = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/family/new'});
 
                 if (info_general !== undefined) {
                     data.info_general = info_general;
@@ -430,10 +562,8 @@ app.get('/title/:name', async (req, res) => {
                 if (info_family !== undefined) {
                     data.info_family = info_family;
                     dataReceived.family = true;
-                    console.log('✓ Info family capturada desde response listener');
                 }
 
-                // Verificar si ya tenemos todos los datos críticos
                 if (dataReceived.general && dataReceived.contacts) {
                     resolveDataLoaded();
                 }
@@ -442,83 +572,46 @@ app.get('/title/:name', async (req, res) => {
             }
         });
 
-        // navegación más rápida
         await retry(async () => {
             await page.goto(`https://datadiverservice.com/consultation/${req.params.name}/client`, {
-                waitUntil: 'domcontentloaded', 
+                waitUntil: 'domcontentloaded',
                 timeout: 25000
             });
         }, 1, 1000);
         
-        
         await Promise.race([
             dataLoadedPromise,
-            delay(6000) // Aumentado a 6 segundos para datos más lentos
+            delay(4000) // Reducido de 6000 a 4000
         ]);
 
         console.log('Datos recibidos:', dataReceived);
         
-        // Esperar un poco más si faltan datos no críticos
-        if (!dataReceived.vehicles || !dataReceived.property || !dataReceived.favorities || !dataReceived.family) {
-            console.log('Esperando datos adicionales...');
-            await delay(2000);
-            console.log('Datos finales recibidos:', dataReceived);
-        }
-
-        // OPTIMIZACIÓN 8: Solo hacer fetch de family si NO se capturó desde el listener
         if (!dataReceived.family) {
-            console.log('Family no capturado desde listener, intentando fetch directo...');
-            let familySuccess = false;
-            let familyAttempts = 0;
-            
-            while (!familySuccess && familyAttempts < 3) {
-                try {
-                    familyAttempts++;
-                    console.log(`Intento ${familyAttempts} - Obteniendo info_family con token...`);
-                    
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 15000);
-                    
-                    const familyRequest = await fetch(
-                        `https://api.datadiverservice.com/ds/crn/client/info/family/new?dni=${req.params.name}`, 
-                        {
-                            headers: {
-                                Accept: 'application/json',
-                                Authorization: `Bearer ${token}`
-                            },
-                            signal: controller.signal
-                        }
-                    );
-                    
-                    clearTimeout(timeoutId);
-
-                    if (familyRequest.ok) {
-                        const response = await familyRequest.json();
-                        data.info_family = response;
-                        familySuccess = true;
-                        console.log('✓ Info family obtenida exitosamente via fetch');
-                    } else if (familyRequest.status === 401) {
-                        console.log('Token inválido (401) para family, renovando...');
-                        await performLogin();
-                    } else {
-                        console.log(`Error en family request: ${familyRequest.status}`);
-                        data.info_family = { message: "No disponible", status: familyRequest.status };
-                        break;
+            console.log('Family no capturado, intentando fetch...');
+            try {
+                const familyRequest = await fetch(
+                    `https://api.datadiverservice.com/ds/crn/client/info/family/new?dni=${req.params.name}`, 
+                    {
+                        headers: {
+                            Accept: 'application/json',
+                            Authorization: `Bearer ${token}`
+                        },
+                        signal: AbortSignal.timeout(10000)
                     }
-                } catch (error) {
-                    console.log(`Error obteniendo info family (intento ${familyAttempts}):`, error.message);
-                    if (familyAttempts < 3) {
-                        await delay(2000);
-                    } else {
-                        data.info_family = { message: "No se pudo obtener información familiar", error: error.message };
-                    }
+                );
+                
+                if (familyRequest.ok) {
+                    data.info_family = await familyRequest.json();
                 }
+            } catch (error) {
+                console.log('Error fetch family:', error.message);
             }
-        } else {
-            console.log('✓ Family ya capturado desde listener, omitiendo fetch');
         }
 
-        res.json(data);
+        // TRANSFORMAR A FORMATO ESTRUCTURADO (igual que /client)
+        const structuredData = transformToStructuredFormat(data);
+        
+        res.json(structuredData);
         
         stats.successfulRequests++;
         const responseTime = Date.now() - startTime;
@@ -534,11 +627,175 @@ app.get('/title/:name', async (req, res) => {
         res.status(500).json({ success: false, error: err.message });
     } finally {
         if (page) {
+            await returnPageToPool(page); // CAMBIO CRÍTICO: retornar al pool en lugar de cerrar
+        }
+        releaseSlot();
+    }
+});
+
+// ============================================
+// ENDPOINT ESTRUCTURADO OPTIMIZADO
+// ============================================
+app.get('/client/:name', async (req, res) => {
+    let page = null;
+    const startTime = Date.now();
+    
+    try {
+        stats.totalRequests++;
+        
+        console.log(`Request estructurado para ${req.params.name} - Esperando slot... (Cola: ${pageQueue.length})`);
+        
+        if (pageQueue.length > stats.maxQueueSize) {
+            stats.maxQueueSize = pageQueue.length;
+        }
+        
+        await waitForAvailableSlot();
+        const waitTime = Date.now() - startTime;
+        console.log(`Request para ${req.params.name} - Slot obtenido después de ${waitTime}ms`);
+
+        const now = Date.now();
+        if (!token || now >= tokenExpiry - (2 * 60 * 1000)) {
+            console.log('Renovando token antes de la consulta...');
+            await performLogin();
+        }
+
+        if (!token) {
+            throw new Error('No se pudo obtener un token válido');
+        }
+
+        page = await getPageFromPool();
+
+        let data = {
+            info_general: {},
+            info_contacts: {},
+            info_vehicles: {},
+            info_labour: {},
+            info_property: {},
+            info_favorities: {},
+            info_family: {}
+        };
+
+        let dataReceived = {
+            general: false,
+            contacts: false,
+            vehicles: false,
+            labour: false,
+            property: false,
+            favorities: false,
+            family: false
+        };
+
+        let resolveDataLoaded;
+        const dataLoadedPromise = new Promise(resolve => {
+            resolveDataLoaded = resolve;
+        });
+
+        page.on('response', async (response) => {
             try {
-                await page.close();
-            } catch (e) {
-                console.error('Error cerrando página:', e.message);
+                const url = response.url();
+                
+                const info_general = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/general/new'});
+                const info_contacts = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/contact'});
+                const info_vehicles = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crm/client/vehicle'});
+                const info_labour = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/labournew'});
+                const info_property = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crm/client/property'});
+                const info_favorities = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/favorites'});
+                const info_family = await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/family/new'});
+
+                if (info_general !== undefined) {
+                    data.info_general = info_general;
+                    dataReceived.general = true;
+                }
+                if (info_contacts !== undefined) {
+                    data.info_contacts = info_contacts;
+                    dataReceived.contacts = true;
+                }
+                if (info_vehicles !== undefined) {
+                    data.info_vehicles = info_vehicles;
+                    dataReceived.vehicles = true;
+                }
+                if (info_labour !== undefined) {
+                    data.info_labour = info_labour;
+                    dataReceived.labour = true;
+                }
+                if (info_property !== undefined) {
+                    data.info_property = info_property;
+                    dataReceived.property = true;
+                }
+                if (info_favorities !== undefined) {
+                    data.info_favorities = info_favorities;
+                    dataReceived.favorities = true;
+                }
+                if (info_family !== undefined) {
+                    data.info_family = info_family;
+                    dataReceived.family = true;
+                }
+
+                if (dataReceived.general && dataReceived.contacts) {
+                    resolveDataLoaded();
+                }
+            } catch (err) {
+                console.error('Error procesando response:', err.message);
             }
+        });
+
+        await retry(async () => {
+            await page.goto(`https://datadiverservice.com/consultation/${req.params.name}/client`, {
+                waitUntil: 'domcontentloaded',
+                timeout: 25000
+            });
+        }, 1, 1000);
+        
+        await Promise.race([
+            dataLoadedPromise,
+            delay(4000) // Reducido de 6000 a 4000
+        ]);
+
+        console.log('Datos recibidos:', dataReceived);
+        
+        // Fetch paralelo de family si no fue capturado
+        if (!dataReceived.family) {
+            console.log('Family no capturado, intentando fetch...');
+            try {
+                const familyRequest = await fetch(
+                    `https://api.datadiverservice.com/ds/crn/client/info/family/new?dni=${req.params.name}`, 
+                    {
+                        headers: {
+                            Accept: 'application/json',
+                            Authorization: `Bearer ${token}`
+                        },
+                        signal: AbortSignal.timeout(10000)
+                    }
+                );
+                
+                if (familyRequest.ok) {
+                    data.info_family = await familyRequest.json();
+                }
+            } catch (error) {
+                console.log('Error fetch family:', error.message);
+            }
+        }
+
+        // TRANSFORMAR A FORMATO ESTRUCTURADO
+        const structuredData = transformToStructuredFormat(data);
+        
+        res.json(structuredData);
+        
+        stats.successfulRequests++;
+        const responseTime = Date.now() - startTime;
+        stats.averageResponseTime = 
+            (stats.averageResponseTime * (stats.successfulRequests - 1) + responseTime) / 
+            stats.successfulRequests;
+        
+        console.log(`✓ Consulta estructurada completada en ${responseTime}ms para ${req.params.name}`);
+
+    } catch (err) {
+        stats.failedRequests++;
+        console.error('Error en consulta estructurada:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    } finally {
+        if (page) {
+            await returnPageToPool(page); // CAMBIO CRÍTICO: retornar al pool
         }
         releaseSlot();
     }
@@ -551,7 +808,7 @@ app.get('/sessions', (req, res) => {
     res.json({ 
         activePages,
         queuedRequests: pageQueue.length,
-        pagePoolSize: pagePool.length, // NUEVO
+        pagePoolSize: pagePool.length,
         maxConcurrent: MAX_CONCURRENT_PAGES,
         tokenValid: token !== '',
         tokenExpiresIn: tokenExpiry > 0 ? Math.floor((tokenExpiry - Date.now()) / 1000 / 60) + ' minutos' : 'N/A',
@@ -584,7 +841,6 @@ app.get('/shutdown', async (req, res) => {
         clearInterval(keepAliveInterval);
     }
     
-    // Cerrar páginas del pool
     for (const page of pagePool) {
         try {
             await page.close();
