@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    ports:
+      - "3030:3030"
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=2048
+    # Optimizaciones de recursos
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    # Optimizaciones de red
+    networks:
+      - scraper-network
+    # Shared memory para Chromium
+    shm_size: '512mb'
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3030/sessions"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+networks:
+  scraper-network:
+    driver: bridge
