@@ -19,24 +19,32 @@ class ScrapingController {
                 endpoint: '/title'
             });
 
-            // Realizar scraping con reintentos automáticos transparentes
             const rawData = await this.scrapingService.scrapeData(dni, '/title');
-            
-            // Transformar a formato estructurado
-            const structuredData = DataTransformService.transformToStructuredFormat(rawData);
-            
-            const responseTime = Date.now() - startTime;
-            consoleLogger.info('✅ Consulta completada exitosamente', {
-                dni,
-                endpoint: '/title',
-                responseTime: responseTime + 'ms'
-            });
 
+            if (rawData && rawData.__invalid) {
+                return res.status(400).json({
+                    success: false,
+                    found: false,
+                    dni,
+                    message: 'Cédula inválida — debe tener exactamente 10 dígitos numéricos'
+                });
+            }
+
+            if (rawData && rawData.__notFound) {
+                return res.status(404).json({
+                    success: false,
+                    found: false,
+                    dni,
+                    message: 'Cédula no encontrada en DataDiverService'
+                });
+            }
+
+            const structuredData = DataTransformService.transformToStructuredFormat(rawData);
             res.json(structuredData);
-            
+
         } catch (error) {
             const responseTime = Date.now() - startTime;
-            
+
             // Solo devolver error si realmente no se pudo completar tras todos los reintentos
             consoleLogger.error('❌ Error en consulta tras reintentos automáticos', {
                 dni,
@@ -67,24 +75,32 @@ class ScrapingController {
                 endpoint: '/client'
             });
 
-            // Realizar scraping con reintentos automáticos transparentes
             const rawData = await this.scrapingService.scrapeData(dni, '/client');
-            
-            // Transformar a formato estructurado
-            const structuredData = DataTransformService.transformToStructuredFormat(rawData);
-            
-            const responseTime = Date.now() - startTime;
-            consoleLogger.info('✅ Consulta estructurada completada exitosamente', {
-                dni,
-                endpoint: '/client',
-                responseTime: responseTime + 'ms'
-            });
 
+            if (rawData && rawData.__invalid) {
+                return res.status(400).json({
+                    success: false,
+                    found: false,
+                    dni,
+                    message: 'Cédula inválida — debe tener exactamente 10 dígitos numéricos'
+                });
+            }
+
+            if (rawData && rawData.__notFound) {
+                return res.status(404).json({
+                    success: false,
+                    found: false,
+                    dni,
+                    message: 'Cédula no encontrada en DataDiverService'
+                });
+            }
+
+            const structuredData = DataTransformService.transformToStructuredFormat(rawData);
             res.json(structuredData);
-            
+
         } catch (error) {
             const responseTime = Date.now() - startTime;
-            
+
             // Solo devolver error si realmente no se pudo completar tras todos los reintentos
             consoleLogger.error('❌ Error en consulta estructurada tras reintentos automáticos', {
                 dni,

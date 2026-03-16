@@ -26,6 +26,7 @@ function createRoutes(services) {
     router.get('/health-check', (req, res) => systemController.getHealthCheck(req, res));
     router.post('/refresh-token', (req, res) => systemController.refreshToken(req, res));
     router.post('/force-idle-activity', (req, res) => systemController.forceIdleActivity(req, res));
+    router.get('/resources', (req, res) => systemController.getResources(req, res));
     router.get('/shutdown', (req, res) => systemController.shutdown(req, res));
 
     // ============================================

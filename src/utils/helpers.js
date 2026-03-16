@@ -42,15 +42,23 @@ function convertDateFormat(dateStr) {
     if (!dateStr || dateStr.trim() === '' || dateStr === ' ') {
         return null;
     }
-    
-    const parts = dateStr.trim().split('/');
-    if (parts.length === 3) {
-        const day = parts[0].padStart(2, '0');
-        const month = parts[1].padStart(2, '0');
-        const year = parts[2];
+
+    const s = dateStr.trim();
+
+    // Formato dd/mm/yyyy → yyyy-mm-dd
+    const slashParts = s.split('/');
+    if (slashParts.length === 3) {
+        const day   = slashParts[0].padStart(2, '0');
+        const month = slashParts[1].padStart(2, '0');
+        const year  = slashParts[2];
         return `${year}-${month}-${day}`;
     }
-    
+
+    // Formato yyyy-mm-dd (ya válido, tabla Genoma tras limpiar la edad)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        return s;
+    }
+
     return null;
 }
 

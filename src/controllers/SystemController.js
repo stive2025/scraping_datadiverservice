@@ -2,22 +2,21 @@ const { consoleLogger } = require('../utils/logger');
 
 class SystemController {
     constructor(services) {
-        this.browserService = services.browserService;
-        this.authService = services.authService;
-        this.familyService = services.familyService;
+        this.authService     = services.authService;
+        this.familyService   = services.familyService;
         this.scrapingService = services.scrapingService;
-        this.keepAliveService = services.keepAliveService;
+        this.keepAliveService= services.keepAliveService;
     }
 
     /**
      * Health check simple
      */
     ping(req, res) {
-        res.json({ 
-            status: 'ok', 
+        res.json({
+            status:    'ok',
             timestamp: new Date().toISOString(),
-            uptime: process.uptime(),
-            service: 'datadiverservice-scraper'
+            uptime:    process.uptime(),
+            service:   'datadiverservice-scraper'
         });
     }
 
@@ -28,27 +27,22 @@ class SystemController {
         const uptime = process.uptime();
         const requestsPerHour = (this.scrapingService.stats.totalRequests / (uptime / 3600)).toFixed(2);
         const timeSinceLastRequest = Date.now() - this.scrapingService.lastRequestTime;
-        const timeSinceLastActivity = Date.now() - this.keepAliveService.lastActivityTime;
-        
-        res.json({ 
-            ...this.browserService.stats,
-            tokenValid: this.authService.isTokenValid,
-            tokenExpiresIn: this.authService.isTokenValid ? 
-                this.authService.timeLeftMinutes + ' minutos' : 'N/A',
-            isLoggingIn: this.authService.isLoggingIn,
-            keepAliveActive: !!this.keepAliveService.keepAliveInterval,
-            lastTokenRefresh: this.authService.tokenExpiry > 0 ? 
-                new Date(this.authService.tokenExpiry - (45 * 60 * 1000)).toISOString() : 'N/A',
+
+        res.json({
+            tokenValid:      this.authService.isTokenValid,
+            tokenExpiresIn:  this.authService.isTokenValid ? this.authService.timeLeftMinutes + ' minutos' : 'N/A',
+            isLoggingIn:     this.authService.isLoggingIn,
+            keepAliveActive: this.keepAliveService.stats.isActive,
+            lastTokenRefresh: this.authService.tokenExpiry > 0
+                ? new Date(this.authService.tokenExpiry - (5 * 60 * 60 * 1000)).toISOString()
+                : 'N/A',
             activityStatus: {
-                isIdle: this.keepAliveService.isIdle,
                 timeSinceLastRequest: Math.floor(timeSinceLastRequest / 1000) + 's',
-                timeSinceLastActivity: Math.floor(timeSinceLastActivity / 1000) + 's',
-                lastRequestTime: new Date(this.scrapingService.lastRequestTime).toISOString(),
-                lastActivityTime: new Date(this.keepAliveService.lastActivityTime).toISOString()
+                lastRequestTime:      new Date(this.scrapingService.lastRequestTime).toISOString()
             },
             familyCache: {
-                size: this.familyService.familyCache.size,
-                ttl: '10 minutos'
+                size: this.familyService ? this.familyService.familyCache.size : 0,
+                ttl:  '10 minutos'
             },
             statistics: {
                 ...this.scrapingService.statistics,
@@ -63,45 +57,28 @@ class SystemController {
      */
     async getSystemStatus(req, res) {
         try {
-            const timeLeft = this.authService.timeLeft;
             const timeSinceLastRequest = Date.now() - this.scrapingService.lastRequestTime;
-            const timeSinceLastActivity = Date.now() - this.keepAliveService.lastActivityTime;
-            
-            // Verificar salud de sesión en tiempo real
-            const sessionHealthy = this.authService.token ? 
-                await this.authService.checkSessionHealth() : false;
-            
+
             res.json({
                 timestamp: new Date().toISOString(),
-                browser: {
-                    active: this.browserService.isReady,
-                    ...this.browserService.stats
-                },
                 token: {
-                    exists: !!this.authService.token,
-                    expiresIn: timeLeft > 0 ? Math.floor(timeLeft / 60000) + ' min' : 'expirado',
-                    expiryTime: this.authService.tokenExpiry > 0 ? 
-                        new Date(this.authService.tokenExpiry).toISOString() : null,
-                    healthy: sessionHealthy
+                    valid:      this.authService.isTokenValid,
+                    expiresIn:  this.authService.timeLeftMinutes + ' min',
+                    expiryTime: this.authService.tokenExpiry > 0
+                        ? new Date(this.authService.tokenExpiry).toISOString()
+                        : null
                 },
                 activity: {
-                    isIdle: this.keepAliveService.isIdle,
                     timeSinceLastRequest: Math.floor(timeSinceLastRequest / 1000) + 's',
-                    timeSinceLastActivity: Math.floor(timeSinceLastActivity / 1000) + 's',
-                    lastRequestTime: new Date(this.scrapingService.lastRequestTime).toISOString(),
-                    lastActivityTime: new Date(this.keepAliveService.lastActivityTime).toISOString()
+                    lastRequestTime:      new Date(this.scrapingService.lastRequestTime).toISOString()
                 },
                 keepAlive: {
-                    active: !!this.keepAliveService.keepAliveInterval,
-                    isLoggingIn: this.authService.isLoggingIn
+                    active:     this.keepAliveService.stats.isActive,
+                    isLoggingIn:this.authService.isLoggingIn
                 }
             });
         } catch (error) {
-            res.status(500).json({
-                success: false,
-                error: error.message,
-                timestamp: new Date().toISOString()
-            });
+            res.status(500).json({ success: false, error: error.message, timestamp: new Date().toISOString() });
         }
     }
 
@@ -110,19 +87,16 @@ class SystemController {
      */
     async getHealthCheck(req, res) {
         try {
-            const sessionHealthy = await this.authService.checkSessionHealth();
+            const sessionHealthy = this.authService.checkSessionHealth();
             res.json({
-                success: true,
+                success:        true,
                 sessionHealthy,
-                tokenValid: this.authService.isTokenValid,
-                browserActive: this.browserService.isReady,
-                message: sessionHealthy ? 'Sesión saludable' : 'Sesión requiere renovación'
+                tokenValid:     this.authService.isTokenValid,
+                tokenExpiresIn: this.authService.timeLeftMinutes + ' min',
+                message:        sessionHealthy ? 'Sesión saludable' : 'Sesión requiere renovación'
             });
         } catch (error) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 
@@ -131,80 +105,84 @@ class SystemController {
      */
     async refreshToken(req, res) {
         try {
-            this.authService.token = '';
+            this.authService._accessToken = null;
             await this.authService.performLogin();
-            res.json({ 
-                success: true, 
-                message: 'Token renovado exitosamente', 
-                token: this.authService.token ? 'presente' : 'ausente' 
+            res.json({
+                success:        true,
+                message:        'Token renovado exitosamente',
+                tokenExpiresIn: this.authService.timeLeftMinutes + ' min'
             });
         } catch (error) {
-            res.status(500).json({ 
-                success: false, 
-                error: error.message 
-            });
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 
     /**
-     * Forzar actividad idle
+     * Endpoint legacy — ya no aplica (se usa HTTP directo)
      */
     async forceIdleActivity(req, res) {
-        try {
-            if (!this.browserService.isReady || !this.authService.token) {
-                return res.status(503).json({ 
-                    success: false, 
-                    error: 'Browser o token no disponible' 
-                });
-            }
-            
-            consoleLogger.info('Forzando actividad idle manualmente');
-            await this.keepAliveService._simulateIdleActivity();
-            
-            res.json({ 
-                success: true, 
-                message: 'Actividad idle ejecutada exitosamente',
-                timestamp: new Date().toISOString()
-            });
-        } catch (error) {
-            res.status(500).json({ 
-                success: false, 
-                error: error.message 
-            });
-        }
+        res.status(410).json({
+            success: false,
+            message: 'La actividad idle por browser fue eliminada. El keep-alive ahora usa solo HTTP.',
+            keepAlive: this.keepAliveService.stats
+        });
     }
 
-    /**
-     * Muestra estadísticas periódicas del sistema
-     */
     showPeriodicStats() {
         const stats = this.scrapingService.statistics;
         const uptime = process.uptime();
         const requestsPerHour = (this.scrapingService.stats.totalRequests / (uptime / 3600)).toFixed(1);
-        
         consoleLogger.stats('Resumen del sistema', {
             successRate: stats.successRate,
-            avgTime: stats.averageResponseTime,
-            total: stats.totalRequests + ' consultas',
-            perHour: requestsPerHour + '/h'
+            avgTime:     stats.averageResponseTime,
+            total:       stats.totalRequests + ' consultas',
+            perHour:     requestsPerHour + '/h'
         });
     }
+
+    /**
+     * Consumo de recursos en tiempo real
+     */
+    getResources(req, res) {
+        const mem    = process.memoryUsage();
+        const uptime = process.uptime();
+
+        res.json({
+            timestamp: new Date().toISOString(),
+            uptime: {
+                seconds: Math.floor(uptime),
+                human:   uptime < 3600 ? Math.floor(uptime / 60) + ' min' : (uptime / 3600).toFixed(1) + ' h'
+            },
+            memory: {
+                rss_mb:        Math.round(mem.rss       / 1024 / 1024),
+                heap_used_mb:  Math.round(mem.heapUsed  / 1024 / 1024),
+                heap_total_mb: Math.round(mem.heapTotal / 1024 / 1024),
+                external_mb:   Math.round(mem.external  / 1024 / 1024)
+            },
+            cache: {
+                result_cache_size:  this.scrapingService._resultCache.size,
+                result_cache_ttl:   '15 min',
+                family_cache_size:  this.familyService ? this.familyService.familyCache.size : 0,
+                family_cache_ttl:   '10 min',
+                in_flight_requests: this.scrapingService._inFlight.size
+            },
+            session: {
+                token_valid:      this.authService.isTokenValid,
+                token_expires_in: this.authService.timeLeftMinutes + ' min',
+                logging_in:       this.authService.isLoggingIn
+            }
+        });
+    }
+
     async shutdown(req, res) {
         try {
             consoleLogger.info('Iniciando proceso de shutdown');
-            
             this.keepAliveService.stop();
-            await this.browserService.close();
-            
             consoleLogger.info('Shutdown completado');
             res.json({ message: 'Sistema cerrado exitosamente' });
-            
             setTimeout(() => process.exit(0), 1000);
         } catch (error) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 }

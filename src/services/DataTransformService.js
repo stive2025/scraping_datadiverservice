@@ -65,16 +65,27 @@ class DataTransformService {
             return [];
         }
 
-        return contacts.phones.map(phone => ({
-            id: null,
-            phone_number: phone.phone || null,
-            phone_type: phone.type || null,
-            counter_correct_number: null,
-            counter_incorrect_number: null,
-            client_id: clientId,
-            created_at: now,
-            updated_at: now
-        }));
+        const seen = new Set();
+        return contacts.phones
+            .filter(phone => {
+                const raw = (phone.phone || '').toString();
+                // Normalizar: quitar texto entre paréntesis "(NUEVO)", "(CASA)", etc.
+                // y eliminar espacios para comparar solo los dígitos del número.
+                const normalized = raw.replace(/\(.*?\)/g, '').replace(/\s+/g, '').trim();
+                if (!normalized || seen.has(normalized)) return false;
+                seen.add(normalized);
+                return true;
+            })
+            .map(phone => ({
+                id: null,
+                phone_number: phone.phone || null,
+                phone_type: phone.type || null,
+                counter_correct_number: null,
+                counter_incorrect_number: null,
+                client_id: clientId,
+                created_at: now,
+                updated_at: now
+            }));
     }
 
     /**
@@ -85,14 +96,22 @@ class DataTransformService {
             return [];
         }
 
-        return contacts.emails.map(email => ({
-            id: null,
-            direction: email.email || null,
-            active: 1,
-            client_id: clientId,
-            created_at: now,
-            updated_at: now
-        }));
+        const seen = new Set();
+        return contacts.emails
+            .filter(email => {
+                const addr = (email.email || '').toString().trim().toLowerCase();
+                if (!addr || seen.has(addr)) return false;
+                seen.add(addr);
+                return true;
+            })
+            .map(email => ({
+                id: null,
+                direction: email.email || null,
+                active: 1,
+                client_id: clientId,
+                created_at: now,
+                updated_at: now
+            }));
     }
 
     /**
@@ -148,22 +167,31 @@ class DataTransformService {
         const uniqueFamilyMembers = this._removeFamilyDuplicates(allFamilyMembers);
         
         // Transformar a formato parents
-        return uniqueFamilyMembers.map(member => ({
-            id: null,
-            client_id: clientId,
-            type: this._normalizeRelationship(member),
-            relationship_client_id: null,
-            created_at: now,
-            updated_at: now,
-            name: member.fullname || member.name || member.nombre || null,
-            identification: member.dni || member.identification || member.cedula || null,
-            birth: convertDateFormat(member.dateOfBirth || member.birthDate || member.fechaNacimiento),
-            gender: member.gender || member.genero || member.sexo || null,
-            state_civil: member.civilStatus || member.estadoCivil || member.maritalStatus || null,
-            death: member.dateOfDeath && member.dateOfDeath.trim() !== '' ? 
-                   convertDateFormat(member.dateOfDeath || member.deathDate || member.fechaMuerte) : null,
-            age: member.age || member.edad || null
-        }));
+        return uniqueFamilyMembers.map(member => {
+            // El campo dateOfBirth de la tabla Genoma tiene formato "1979 (46)-09-02"
+            // Extraemos la edad del patrón (número) y limpiamos la cadena de fecha.
+            const rawBirth = member.dateOfBirth || member.birthDate || member.fechaNacimiento || '';
+            const ageFromBirth = rawBirth.match(/\((\d+)\)/);
+            const cleanBirth = rawBirth.replace(/\s*\(\d+\)\s*/g, '').replace(/\s+/g, '').trim() || null;
+            const resolvedAge = member.age || member.edad || (ageFromBirth ? ageFromBirth[1] : null);
+
+            return {
+                id: null,
+                client_id: clientId,
+                type: this._normalizeRelationship(member),
+                relationship_client_id: null,
+                created_at: now,
+                updated_at: now,
+                name: member.fullname || member.name || member.nombre || null,
+                identification: member.dni || member.identification || member.cedula || null,
+                birth: convertDateFormat(cleanBirth) || cleanBirth || null,
+                gender: member.gender || member.genero || member.sexo || null,
+                state_civil: member.civilStatus || member.estadoCivil || member.maritalStatus || null,
+                death: member.dateOfDeath && member.dateOfDeath.trim() !== '' ?
+                       convertDateFormat(member.dateOfDeath || member.deathDate || member.fechaMuerte) : null,
+                age: resolvedAge
+            };
+        });
     }
 
     /**

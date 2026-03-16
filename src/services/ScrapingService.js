@@ -1,517 +1,264 @@
 const { logger, consoleLogger } = require('../utils/logger');
 const config = require('../config');
-const { delay, retry, getData } = require('../utils/helpers');
 
+/**
+ * ScrapingService — obtiene datos de clientes via API HTTP directa.
+ *
+ * Ya no usa Puppeteer ni navegación browser. Llama a HttpService que hace
+ * requests directos a la API de DataDiverService con Bearer token.
+ *
+ * Mantiene: cache de resultados, deduplicación in-flight, validación de cédula.
+ */
 class ScrapingService {
-    constructor(browserService, authService, familyService, keepAliveService = null) {
-        this.browserService = browserService;
+    constructor(authService, httpService, keepAliveService = null, familyService = null) {
         this.authService = authService;
+        this.httpService = httpService;
+        this.keepAliveService = keepAliveService;
         this.familyService = familyService;
-        this.keepAliveService = keepAliveService; // NEW: Reference to KeepAliveService
         this.stats = {
             totalRequests: 0,
             successfulRequests: 0,
             failedRequests: 0,
             averageResponseTime: 0,
-            maxQueueSize: 0
+            cacheHits: 0
         };
         this.lastRequestTime = Date.now();
-        this.lastHealthCheck = 0; // NEW: Track last health check time
-        this.concurrentRequests = new Map(); // NEW: Track concurrent requests
-        this.sessionValidationInProgress = false; // NEW: Prevent concurrent session validations
+        this._inFlight = new Map();
+        this._resultCache = new Map();
     }
 
     /**
-     * Realiza scraping de datos para un DNI específico con reintentos automáticos transparentes
+     * Punto de entrada principal. Aplica cache y deduplicación antes de consultar la API.
      */
     async scrapeData(dni, endpoint = '/title', maxRetries = 2) {
+        this.stats.totalRequests++;
+        this.lastRequestTime = Date.now();
+
+        if (this.keepAliveService) {
+            this.keepAliveService.updateLastRequestTime();
+        }
+
+        const dniStr = String(dni || '').trim();
+        if (!/^\d{10}$/.test(dniStr)) {
+            logger.warn('Cédula rechazada: no tiene 10 dígitos', { dni: dniStr });
+            return { __invalid: true, dni: dniStr };
+        }
+
+        // Verificar cache
+        const cached = this._resultCache.get(dniStr);
+        if (cached) {
+            const ttl = cached.notFound ? (2 * 60 * 1000) : config.cache.resultTTL;
+            if (Date.now() - cached.timestamp < ttl) {
+                this.stats.cacheHits++;
+                this.stats.successfulRequests++;
+                logger.debug('Resultado servido desde cache', { dni: dniStr });
+                consoleLogger.queryStart(dniStr);
+                consoleLogger.queryComplete(dniStr, 0, !cached.notFound);
+                return cached.data;
+            }
+        }
+
+        // Deduplicación in-flight: si este DNI ya está siendo consultado, esperar el mismo resultado
+        if (this._inFlight.has(dniStr)) {
+            logger.debug('DNI ya en proceso, esperando resultado compartido', { dni: dniStr });
+            return this._inFlight.get(dniStr);
+        }
+
+        const promise = this._fetchData(dniStr, maxRetries)
+            .then(data => {
+                if (data && data.info_general && Object.keys(data.info_general).length > 0) {
+                    this._resultCache.set(dniStr, { data, timestamp: Date.now(), notFound: false });
+                    this._cleanResultCache();
+                }
+                return data;
+            })
+            .catch(err => {
+                logger.warn('Error en consulta (no cacheado)', { dni: dniStr, error: err.message });
+                throw err;
+            })
+            .finally(() => {
+                this._inFlight.delete(dniStr);
+            });
+
+        this._inFlight.set(dniStr, promise);
+        return promise;
+    }
+
+    /**
+     * Consulta todos los endpoints de la API en paralelo y construye el rawData
+     * en el formato que espera DataTransformService.
+     */
+    async _fetchData(dni, maxRetries) {
         const startTime = Date.now();
-        const requestId = `${dni}-${startTime}`;
-        let page = null;
-        let currentAttempt = 0;
-        
-        while (currentAttempt <= maxRetries) {
+        consoleLogger.queryStart(dni);
+
+        let lastError;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-                if (currentAttempt === 0) {
-                    this.stats.totalRequests++;
-                    this.lastRequestTime = Date.now();
-                    
-                    // Notificar al KeepAliveService sobre la nueva request
-                    if (this.keepAliveService) {
-                        this.keepAliveService.updateLastRequestTime();
-                    }
-                    
-                    // Registrar request concurrente
-                    this.concurrentRequests.set(requestId, { dni, startTime, endpoint });
-                    
-                    // Iniciar consulta estilo Chrome
-                    consoleLogger.queryStart(dni);
-                } else {
-                    consoleLogger.loadingProgress(dni, 'Reintentando consulta automáticamente...');
-                }
-                
-                // Verificar y renovar token si es necesario (con control de concurrencia)
-                await this._ensureValidToken();
-                
-                // Obtener página del pool
-                await this.browserService.waitForAvailableSlot();
-                page = await this.browserService.getPageFromPool();
-                
-                // Configurar captura de datos
-                const data = this._initializeDataStructure();
-                const dataReceived = this._initializeDataReceivedFlags();
-                
-                const { dataLoadedPromise, resolveDataLoaded } = this._setupDataCapture(page, data, dataReceived, dni);
-                
-                // Navegar a la página de consulta
-                await this._navigateToConsultation(page, dni);
-                
-                // Esperar a que se carguen los datos con timeout optimizado
-                await Promise.race([
-                    dataLoadedPromise,
-                    delay(3500)
+                // Ejecutar consulta principal y familia en paralelo
+                const [apiData, extendedFamily] = await Promise.all([
+                    this.httpService.fetchAll(dni),
+                    this.familyService
+                        ? this.familyService.tryMultipleFamilyEndpoints(dni).catch(err => {
+                            logger.warn('FamilyService falló, usando solo datos del endpoint general', { dni, error: err.message });
+                            return { family: [], data: [], results: [], relatives: [], parentesco: [] };
+                        })
+                        : Promise.resolve({ family: [], data: [], results: [], relatives: [], parentesco: [] })
                 ]);
-                
-                // Verificar si se capturaron datos básicos
-                if (!dataReceived.general || !dataReceived.contacts) {
-                    // Verificar si es problema de sesión
-                    const tokenStillValid = this.authService.token && 
-                        Date.now() < this.authService.tokenExpiry - (2 * 60 * 1000);
-                    
-                    if (!tokenStillValid) {
-                        // Sesión expirada - forzar renovación y reintentar
-                        logger.warn('Sesión expirada detectada, renovando automáticamente', { 
-                            dni, 
-                            attempt: currentAttempt + 1 
-                        });
-                        
-                        this.authService.token = '';
-                        this.authService.tokenExpiry = 0;
-                        
-                        // Cerrar página actual
-                        if (page) {
-                            await this.browserService.returnPageToPool(page);
-                            page = null;
-                        }
-                        this.browserService.releaseSlot();
-                        
-                        // Esperar un momento antes del reintento
-                        await delay(1000);
-                        
-                        // Incrementar intento y continuar el loop
-                        currentAttempt++;
-                        continue;
-                    }
+
+                // Si el endpoint principal no devolvió datos → DNI no existe
+                if (!apiData.general) {
+                    this.stats.successfulRequests++;
+                    const responseTime = Date.now() - startTime;
+                    this._updateAverageResponseTime(responseTime);
+                    consoleLogger.queryComplete(dni, responseTime, false);
+                    logger.info('DNI no encontrado via API', { dni });
+                    return { __notFound: true, dni };
                 }
-                
-                // Capturar datos de familia adicionales si es necesario
-                await this._captureFamilyData(dni, data, dataReceived);
-                
-                // Si llegamos aquí, la consulta fue exitosa
+
+                // Combinar familia de todas las fuentes:
+                // 1. apiData.general.family   → campo family del endpoint general/new
+                // 2. apiData.family            → endpoint family/new o family (directo via HttpService)
+                // 3. extendedFamily            → FamilyService (intenta múltiples endpoints adicionales)
+                const generalFamily  = apiData.general.family || [];
+                const httpFamily     = this._extractFamilyArray(apiData.family);
+                const info_family = {
+                    family:     [...generalFamily, ...httpFamily, ...(extendedFamily.family    || [])],
+                    data:       extendedFamily.data      || [],
+                    results:    extendedFamily.results   || [],
+                    relatives:  extendedFamily.relatives || [],
+                    parentesco: extendedFamily.parentesco|| []
+                };
+
+                logger.info('Familia combinada', {
+                    dni,
+                    generalFamilyCount:  generalFamily.length,
+                    httpFamilyCount:     httpFamily.length,
+                    extendedFamilyCount: extendedFamily.family?.length || 0,
+                    totalBeforeDedup:    info_family.family.length
+                });
+
+                // Construir rawData en formato esperado por DataTransformService
+                const rawData = {
+                    info_general: {
+                        ...apiData.general,
+                        id: apiData.general.id || null
+                    },
+                    info_contacts: this._mapContactData(apiData.contact),
+                    info_family
+                };
+
                 this.stats.successfulRequests++;
                 const responseTime = Date.now() - startTime;
                 this._updateAverageResponseTime(responseTime);
-                
-                // Mostrar resultado final estilo Chrome
                 consoleLogger.queryComplete(dni, responseTime, true);
-                
-                return data;
-                
-            } catch (error) {
-                // Cerrar página si hay error
-                if (page) {
-                    await this.browserService.returnPageToPool(page);
-                    page = null;
-                }
-                this.browserService.releaseSlot();
-                
-                // Verificar si es un error de sesión que podemos reintentar
-                const isSessionError = error.message.includes('Sesión expirada') || 
-                                     error.message.includes('401') || 
-                                     error.message.includes('403') ||
-                                     error.message.includes('unauthorized');
-                
-                if (isSessionError && currentAttempt < maxRetries) {
-                    logger.warn('Error de sesión detectado, reintentando automáticamente', { 
-                        dni, 
-                        error: error.message,
-                        attempt: currentAttempt + 1,
-                        maxRetries: maxRetries + 1
-                    });
-                    
-                    // Forzar renovación de token
-                    this.authService.token = '';
-                    this.authService.tokenExpiry = 0;
-                    
-                    // Esperar antes del reintento
-                    await delay(1500);
-                    
-                    currentAttempt++;
-                    continue;
-                }
-                
-                // Si no es error de sesión o ya agotamos reintentos, lanzar error
-                this.stats.failedRequests++;
-                const responseTime = Date.now() - startTime;
-                consoleLogger.queryComplete(dni, responseTime, false);
-                logger.error('Error en scraping tras reintentos', { 
-                    dni,
-                    endpoint,
-                    error: error.message,
-                    attempts: currentAttempt + 1,
-                    stack: error.stack
-                });
-                throw error;
-            } finally {
-                // Limpiar recursos solo en el último intento
-                if (currentAttempt >= maxRetries || page) {
-                    this.concurrentRequests.delete(requestId);
-                    
-                    if (page) {
-                        await this.browserService.returnPageToPool(page);
-                    }
-                    this.browserService.releaseSlot();
-                }
-            }
-        }
-    }
 
-    /**
-     * Asegura que el token sea válido con verificación mejorada
-     */
-    async _ensureValidToken() {
-        const now = Date.now();
-        
-        // Verificación más inteligente: renovar si queda menos de 5 minutos
-        const timeUntilExpiry = this.authService.tokenExpiry - now;
-        const shouldRenewByTime = !this.authService.token || timeUntilExpiry < (5 * 60 * 1000);
-        
-        if (shouldRenewByTime) {
-            const reason = !this.authService.token ? 'sin token' : 'próximo a expirar';
-            const timeLeftMin = Math.floor(timeUntilExpiry / 60000);
-            
-            if (this.authService.isLoggingIn) {
-                consoleLogger.auth('Login en progreso, esperando token fresco...');
-                // Esperar hasta 15 segundos a que termine el login
-                let attempts = 0;
-                while (this.authService.isLoggingIn && attempts < 30) {
-                    await delay(500);
-                    attempts++;
-                }
-            } else {
-                consoleLogger.auth(`Renovando token (${reason}, ${timeLeftMin} min restantes)`);
-                await this.authService.performLogin();
-            }
-        } else {
-            // Token debería ser válido según tiempo local, pero verificar salud ocasionalmente
-            const timeSinceLastCheck = now - (this.lastHealthCheck || 0);
-            
-            // Verificar salud solo cada 2 minutos para no sobrecargar
-            if (timeSinceLastCheck > (2 * 60 * 1000)) {
-                this.lastHealthCheck = now;
-                
-                const sessionHealthy = await this.authService.checkSessionHealth();
-                if (!sessionHealthy) {
-                    if (this.authService.isLoggingIn) {
-                        consoleLogger.auth('Renovación de sesión en progreso, esperando...');
-                        let attempts = 0;
-                        while (this.authService.isLoggingIn && attempts < 30) {
-                            await delay(500);
-                            attempts++;
-                        }
-                    } else {
-                        consoleLogger.warn('Sesión no saludable detectada, renovando', { 
-                            action: 'Renovando automáticamente' 
-                        });
-                        await this.authService.performLogin();
-                    }
-                }
-            }
-        }
+                return rawData;
 
-        // Verificación final
-        if (!this.authService.token) {
-            throw new Error('No se pudo obtener un token válido');
-        }
-    }
-
-    /**
-     * Inicializa la estructura de datos
-     */
-    _initializeDataStructure() {
-        return {
-            info_general: {},
-            info_contacts: {},
-            info_vehicles: {},
-            info_labour: {},
-            info_property: {},
-            info_favorities: {},
-            info_family: {}
-        };
-    }
-
-    /**
-     * Inicializa las banderas de datos recibidos
-     */
-    _initializeDataReceivedFlags() {
-        return {
-            general: false,
-            contacts: false,
-            vehicles: false,
-            labour: false,
-            property: false,
-            favorities: false,
-            family: false
-        };
-    }
-
-    /**
-     * Configura la captura de datos de respuestas HTTP con detección rápida de expiración
-     */
-    _setupDataCapture(page, data, dataReceived, dni) {
-        let resolveDataLoaded;
-        const dataLoadedPromise = new Promise(resolve => {
-            resolveDataLoaded = resolve;
-        });
-
-        page.on('response', async (response) => {
-            try {
-                const url = response.url();
-                
-                // Verificar si la respuesta indica sesión expirada - DETECCIÓN RÁPIDA
-                if (response.status() === 401 || response.status() === 403) {
-                    consoleLogger.warn('Sesión expirada detectada durante scraping', { 
-                        dni,
-                        action: 'Renovando token automáticamente'
-                    });
-                    this.authService.token = '';
-                    this.authService.tokenExpiry = 0;
-                    // Resolver inmediatamente para no esperar más datos
-                    resolveDataLoaded();
-                    return;
-                }
-                
-                // Capturar datos de diferentes endpoints
-                const endpoints = {
-                    info_general: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/general/new'}),
-                    info_contacts: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/contact'}),
-                    info_vehicles: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crm/client/vehicle'}),
-                    info_labour: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/labournew'}),
-                    info_property: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crm/client/property'}),
-                    info_favorities: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/favorites'}),
-                    info_family: await getData({response, url, endpoint: 'api.datadiverservice.com/ds/crn/client/info/family/new'})
-                };
-
-                // Asignar datos capturados y mostrar progreso
-                Object.entries(endpoints).forEach(([key, value]) => {
-                    if (value !== undefined) {
-                        data[key] = value;
-                        const flagKey = key.replace('info_', '');
-                        dataReceived[flagKey] = true;
-                        
-                        // Mostrar progreso de captura estilo Chrome
-                        const dataTypeNames = {
-                            'general': 'general',
-                            'contacts': 'contacts',
-                            'vehicles': 'vehicles',
-                            'labour': 'labour',
-                            'property': 'property',
-                            'favorities': 'favorities',
-                            'family': 'family'
-                        };
-                        
-                        consoleLogger.dataCapture(dni, dataTypeNames[flagKey], true);
-                    }
-                });
-
-                // Resolver cuando se tengan datos básicos
-                if (dataReceived.general && dataReceived.contacts) {
-                    resolveDataLoaded();
-                }
             } catch (err) {
-                logger.error('Error procesando response', { 
-                    dni,
-                    error: err.message 
-                });
-            }
-        });
-
-        return { dataLoadedPromise, resolveDataLoaded };
-    }
-
-    /**
-     * Navega a la página de consulta con optimizaciones de velocidad
-     */
-    async _navigateToConsultation(page, dni) {
-        await retry(async () => {
-            await page.goto(`${config.datadiverservice.baseUrl}/consultation/${dni}/client`, {
-                waitUntil: 'domcontentloaded',
-                timeout: 20000 // Reducido de 25s a 20s
-            });
-        }, 1, 1000);
-        
-        // Hacer scroll optimizado para activar carga de datos adicionales
-        try {
-            await page.evaluate(() => {
-                window.scrollTo(0, document.body.scrollHeight);
-            });
-            await delay(500); // Reducido de 1000ms a 500ms
-            await page.evaluate(() => {
-                window.scrollTo(0, 0);
-            });
-        } catch (scrollError) {
-            logger.debug('Error haciendo scroll', { 
-                dni,
-                error: scrollError.message 
-            });
-        }
-    }
-
-    /**
-     * Captura datos de familia adicionales con estrategia optimizada
-     */
-    async _captureFamilyData(dni, data, dataReceived) {
-        const currentFamilyCount = this._getCurrentFamilyCount(data);
-        
-        // Optimización: Solo intentar captura adicional si realmente no hay datos de familia
-        if (!dataReceived.family && currentFamilyCount === 0) {
-            logger.info('Family no capturado, intentando captura optimizada', { 
-                dni,
-                currentFamilyCount,
-                dataReceived: dataReceived.family
-            });
-            
-            try {
-                const familyData = await this.familyService.tryMultipleFamilyEndpoints(dni);
-                const totalFamilyMembers = this.familyService._getTotalMembers(familyData);
-                
-                if (totalFamilyMembers > 0) {
-                    // Combinar con datos existentes evitando duplicados
-                    const mergedFamilyData = this._mergeFamilyData(data.info_family, familyData);
-                    data.info_family = mergedFamilyData;
-                    
-                    logger.info('Familia capturada exitosamente con estrategia optimizada', {
-                        dni,
-                        totalMembers: totalFamilyMembers,
-                        previousCount: currentFamilyCount,
-                        improvement: totalFamilyMembers - currentFamilyCount
+                lastError = err;
+                if (attempt < maxRetries) {
+                    logger.warn('Error en consulta API, reintentando', {
+                        dni, error: err.message, attempt: attempt + 1
                     });
-                } else {
-                    logger.debug('Estrategia optimizada no obtuvo resultados', { dni });
+                    await new Promise(r => setTimeout(r, 1500));
                 }
-            } catch (error) {
-                logger.error('Error en captura optimizada de familia', { 
-                    dni, 
-                    error: error.message 
-                });
-            }
-        } else {
-            logger.debug('Datos de familia ya capturados o presentes', {
-                dni,
-                familyCount: currentFamilyCount,
-                dataReceived: dataReceived.family
-            });
-        }
-    }
-
-    /**
-     * Obtiene el conteo actual de miembros de familia
-     */
-    _getCurrentFamilyCount(data) {
-        let count = 0;
-        
-        if (data.info_family) {
-            count += (data.info_family.family?.length || 0);
-            count += (data.info_family.data?.length || 0);
-            count += (data.info_family.results?.length || 0);
-            count += (data.info_family.relatives?.length || 0);
-            count += (data.info_family.parentesco?.length || 0);
-        }
-        
-        return count;
-    }
-
-    /**
-     * Combina datos de familia evitando duplicados
-     */
-    _mergeFamilyData(existingData, newData) {
-        if (!existingData || Object.keys(existingData).length === 0) {
-            return newData;
-        }
-        
-        const merged = { ...existingData };
-        const keys = ['family', 'data', 'results', 'relatives', 'parentesco'];
-        
-        keys.forEach(key => {
-            if (newData[key] && Array.isArray(newData[key])) {
-                if (!merged[key]) merged[key] = [];
-                
-                // Agregar solo elementos que no estén duplicados
-                const existingIds = new Set();
-                merged[key].forEach(item => {
-                    const id = item.dni || item.identification || item.fullname || item.name;
-                    if (id) existingIds.add(id);
-                });
-                
-                const newItems = newData[key].filter(item => {
-                    const id = item.dni || item.identification || item.fullname || item.name;
-                    return id && !existingIds.has(id);
-                });
-                
-                merged[key].push(...newItems);
-            }
-        });
-        
-        return merged;
-    }
-
-    /**
-     * Maneja fallos en el scraping
-     */
-    async _handleFailedScraping(dni, endpoint, dataReceived) {
-        if (!dataReceived.general && !dataReceived.contacts) {
-            consoleLogger.warn('Sesión expirada detectada, forzando re-login', { 
-                dni, 
-                action: 'Renovando credenciales'
-            });
-            
-            // Forzar renovación de token inmediatamente
-            this.authService.token = '';
-            this.authService.tokenExpiry = 0;
-            
-            try {
-                await this.authService.performLogin();
-                return true; // Indica que se debe reintentar
-            } catch (error) {
-                logger.error('Error renovando sesión después de fallo', { 
-                    dni, 
-                    error: error.message 
-                });
-                return false;
             }
         }
-        
-        return false;
+
+        this.stats.failedRequests++;
+        const responseTime = Date.now() - startTime;
+        consoleLogger.queryComplete(dni, responseTime, false);
+        logger.error('Error en consulta tras reintentos', { dni, error: lastError.message });
+        throw lastError;
     }
 
     /**
-     * Actualiza el tiempo promedio de respuesta
+     * Mapea la respuesta del endpoint /contact al formato { phones, emails, address }
+     * que espera DataTransformService.
      */
+    /**
+     * Extrae el array de miembros de familia de la respuesta del endpoint /family o /family/new.
+     * La API puede devolver { family: [...] }, { data: [...] }, o directamente un array.
+     */
+    _extractFamilyArray(data) {
+        if (!data) return [];
+        if (Array.isArray(data)) return data;
+        // Buscar en las claves más comunes
+        for (const key of ['family', 'data', 'results', 'relatives', 'parentesco']) {
+            if (Array.isArray(data[key]) && data[key].length > 0) return data[key];
+        }
+        return [];
+    }
+
+    _mapContactData(contact) {
+        if (!contact) return { phones: [], emails: [], address: [] };
+
+        // Algunos endpoints envuelven la respuesta en .data o .result
+        const c = contact.data || contact.result || contact;
+
+        return {
+            phones:  this._toArray(c.phones   || c.telefonos       || c.phone_numbers   || []),
+            emails:  this._toArray(c.emails   || c.correos         || c.email_addresses || []),
+            address: this._toArray(c.address  || c.addresses       || c.direcciones     || [])
+        };
+    }
+
+    _toArray(val) {
+        return Array.isArray(val) ? val : [];
+    }
+
+    /**
+     * Valida cédula ecuatoriana: 10 dígitos, provincia 01-24, dígito verificador Módulo 10.
+     */
+    _isValidEcuadorianCedula(dni) {
+        if (!/^\d{10}$/.test(dni)) return false;
+
+        const province = parseInt(dni.substring(0, 2), 10);
+        if (province < 1 || province > 24) return false;
+
+        const thirdDigit = parseInt(dni[2], 10);
+
+        if (thirdDigit <= 5) {
+            const coeff = [2, 1, 2, 1, 2, 1, 2, 1, 2];
+            let sum = 0;
+            for (let i = 0; i < 9; i++) {
+                let val = parseInt(dni[i], 10) * coeff[i];
+                if (val >= 10) val -= 9;
+                sum += val;
+            }
+            const check = (10 - (sum % 10)) % 10;
+            return check === parseInt(dni[9], 10);
+        }
+
+        return thirdDigit === 6 || thirdDigit === 9;
+    }
+
     _updateAverageResponseTime(responseTime) {
-        this.stats.averageResponseTime = 
-            (this.stats.averageResponseTime * (this.stats.successfulRequests - 1) + responseTime) / 
-            this.stats.successfulRequests;
+        const total = this.stats.successfulRequests + this.stats.failedRequests;
+        this.stats.averageResponseTime = total > 1
+            ? Math.round((this.stats.averageResponseTime * (total - 1) + responseTime) / total)
+            : responseTime;
     }
 
-    /**
-     * Getters para estadísticas
-     */
+    _cleanResultCache() {
+        const now = Date.now();
+        for (const [key, val] of this._resultCache.entries()) {
+            const ttl = val.notFound ? (2 * 60 * 1000) : config.cache.resultTTL;
+            if (now - val.timestamp > ttl) {
+                this._resultCache.delete(key);
+            }
+        }
+    }
+
     get statistics() {
+        const total = this.stats.successfulRequests + this.stats.failedRequests;
         return {
             ...this.stats,
-            successRate: this.stats.totalRequests > 0 ? 
-                ((this.stats.successfulRequests / this.stats.totalRequests) * 100).toFixed(2) + '%' : '0%',
-            averageResponseTime: this.stats.averageResponseTime.toFixed(0) + 'ms'
+            successRate:         total > 0 ? ((this.stats.successfulRequests / total) * 100).toFixed(1) + '%' : 'N/A',
+            averageResponseTime: this.stats.averageResponseTime + 'ms',
+            cacheSize:           this._resultCache.size
         };
     }
 }
