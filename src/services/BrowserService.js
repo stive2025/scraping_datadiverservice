@@ -61,11 +61,7 @@ class BrowserService {
 
     /**
      * Crea una página con configuración stealth básica.
-     *
-     * Cambios respecto al enfoque anterior:
-     * - Ya no interceptamos requests ni bloqueamos CSS/JS (Angular los necesita para renderizar)
-     * - Solo bloqueamos imágenes y media para ahorrar ancho de banda
-     * - Añadimos User-Agent real, viewport realista y ocultamos navigator.webdriver
+     * Añadimos User-Agent real, viewport realista y ocultamos navigator.webdriver
      */
     async createOptimizedPage() {
         const page = await this.browser.newPage();
