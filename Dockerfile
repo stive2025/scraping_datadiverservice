@@ -15,10 +15,14 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
     NODE_ENV=production
 
-# Optimizaciones de Node.js
-ENV NODE_OPTIONS="--max-old-space-size=2048"
+# Node.js: limitar heap a 768 MB para que Chromium tenga espacio suficiente
+# en el contenedor de 2 GB (Node ~768 MB + Chromium 4-6 tabs ~800 MB + SO ~200 MB)
+ENV NODE_OPTIONS="--max-old-space-size=768"
 
 WORKDIR /app
+
+# Crear directorio de logs
+RUN mkdir -p logs
 
 # Copiar solo package.json primero (para aprovechar cache de Docker)
 COPY package*.json ./
@@ -33,4 +37,4 @@ COPY . .
 EXPOSE 3030
 
 # Comando de inicio
-CMD ["node", "test2.js"]
+CMD ["node", "src/index.js"]
