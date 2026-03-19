@@ -1,52 +1,49 @@
 const winston = require('winston');
 const config = require('../config');
 
-// Mapa para rastrear usuarios por DNI - cada DNI único tendrá su propio número de usuario
+// ─── Mapa de usuarios ────────────────────────────────────────────────────────
 const userMap = new Map();
 let globalUserCounter = 0;
-let lastTimestamp = '';
 
 const getUserNumber = (dni) => {
     if (!userMap.has(dni)) {
         globalUserCounter++;
         userMap.set(dni, globalUserCounter);
+        if (userMap.size > 200) {
+            const oldest = userMap.keys().next().value;
+            userMap.delete(oldest);
+        }
     }
     return userMap.get(dni);
 };
 
-// Función para limpiar usuarios antiguos (opcional, para evitar memory leaks)
-const cleanOldUsers = () => {
-    if (userMap.size > 100) { // Mantener solo los últimos 100 usuarios
-        const entries = Array.from(userMap.entries());
-        const toKeep = entries.slice(-50); // Mantener los últimos 50
-        userMap.clear();
-        toKeep.forEach(([dni, userNum]) => userMap.set(dni, userNum));
-    }
+// ─── Colores ANSI ────────────────────────────────────────────────────────────
+const C = {
+    reset:   '\x1b[0m',
+    bold:    '\x1b[1m',
+    dim:     '\x1b[2m',
+    red:     '\x1b[31m',
+    green:   '\x1b[32m',
+    yellow:  '\x1b[33m',
+    blue:    '\x1b[34m',
+    cyan:    '\x1b[36m',
+    white:   '\x1b[37m',
+    gray:    '\x1b[90m',
+    bgRed:   '\x1b[41m',
 };
 
-// Colores personalizados para diferentes tipos de mensajes
-const colors = {
-    error: '\x1b[31m',    // Rojo
-    warn: '\x1b[33m',     // Amarillo
-    info: '\x1b[36m',     // Cian
-    success: '\x1b[32m',  // Verde
-    debug: '\x1b[35m',    // Magenta
-    reset: '\x1b[0m',     // Reset
-    bright: '\x1b[1m',    // Negrita
-    dim: '\x1b[2m'        // Tenue
-};
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const pad = (str, len) => str.toString().padEnd(len);
 
-// Función para formatear tiempo transcurrido
 const formatDuration = (ms) => {
-    if (ms < 1000) return `${ms}ms`;
+    if (ms <= 0)    return 'cache';
+    if (ms < 1000)  return `${ms}ms`;
     if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
     return `${(ms / 60000).toFixed(1)}min`;
 };
 
-// Función para obtener timestamp formateado en zona horaria de Ecuador
 const getTimestamp = () => {
-    const now = new Date();
-    return now.toLocaleTimeString('es-EC', { 
+    return new Date().toLocaleTimeString('es-EC', {
         timeZone: 'America/Guayaquil',
         hour12: false,
         hour: '2-digit',
@@ -55,13 +52,21 @@ const getTimestamp = () => {
     });
 };
 
-// Función para mostrar timestamp siempre
-const getTimestampAlways = () => {
-    const current = getTimestamp();
-    return `[${current}] `;
+// Prefijos con color fijo para cada categoría
+const PREFIX = {
+    SISTEMA:    `${C.cyan}${C.bold}SISTEMA  ${C.reset}`,
+    AUTH:       `${C.yellow}${C.bold}AUTH     ${C.reset}`,
+    CONSULTA:   `${C.blue}${C.bold}CONSULTA ${C.reset}`,
+    OK:         `${C.green}${C.bold}✓        ${C.reset}`,
+    ERROR:      `${C.red}${C.bold}✗        ${C.reset}`,
+    KEEPALIVE:  `${C.gray}KEEP-ALIVE${C.reset}`,
+    STATS:      `${C.cyan}${C.bold}STATS    ${C.reset}`,
+    WARN:       `${C.yellow}AVISO    ${C.reset}`,
 };
 
-// Logger principal para archivos (completo)
+const ts = () => `${C.dim}[${getTimestamp()}]${C.reset} `;
+
+// ─── Logger a archivos (Winston — JSON completo) ──────────────────────────────
 const logger = winston.createLogger({
     level: config.logging.level,
     format: winston.format.combine(
@@ -71,13 +76,13 @@ const logger = winston.createLogger({
     ),
     defaultMeta: { service: 'datadiverservice-scraper' },
     transports: [
-        new winston.transports.File({ 
-            filename: 'logs/error.log', 
+        new winston.transports.File({
+            filename: 'logs/error.log',
             level: 'error',
             maxsize: config.logging.maxSize,
             maxFiles: config.logging.maxFiles
         }),
-        new winston.transports.File({ 
+        new winston.transports.File({
             filename: config.logging.file,
             maxsize: config.logging.maxSize,
             maxFiles: config.logging.maxFiles
@@ -85,148 +90,94 @@ const logger = winston.createLogger({
     ]
 });
 
-// Logger profesional para consola - FORMATO LIMPIO Y MINIMALISTA
+// ─── Logger de consola (producción — limpio y con color) ─────────────────────
 const consoleLogger = {
-    // Mensajes del sistema - SOLO LO ESENCIAL
-    system: (message, details = {}) => {
-        const timestamp = getTimestampAlways();
-        console.log(`${timestamp}SISTEMA ${message}`);
+
+    system: (message) => {
+        console.log(`${ts()}${PREFIX.SISTEMA}${message}`);
     },
 
-    // Autenticación y tokens - SOLO LO ESENCIAL
     auth: (message, details = {}) => {
-        const timestamp = getTimestampAlways();
-        console.log(`${timestamp}AUTH ${message}`);
+        const extra = details.timeLeft ? ` ${C.dim}(${details.timeLeft})${C.reset}` : '';
+        console.log(`${ts()}${PREFIX.AUTH}${message}${extra}`);
     },
 
-    // Inicio de consulta - MINIMALISTA
     queryStart: (dni) => {
-        const timestamp = getTimestampAlways();
-        const userNumber = getUserNumber(dni);
-        console.log(`${timestamp}CONSULTA User ${userNumber} DNI: ${dni}`);
+        const user = getUserNumber(dni);
+        console.log(`${ts()}${PREFIX.CONSULTA}${C.bold}User ${pad(user, 3)}${C.reset}${C.dim} DNI: ${dni}${C.reset}`);
     },
 
-    // Solo mostrar cuando se capturan datos específicos
-    dataCapture: (dni, dataType, success = true) => {
+    queryComplete: (dni, responseTime, success = true) => {
+        const user = getUserNumber(dni);
+        const duration = formatDuration(responseTime);
+        const fromCache = responseTime <= 0;
+
         if (success) {
-            const timestamp = getTimestampAlways();
-            const userNumber = getUserNumber(dni);
-            
-            console.log(`${timestamp}User ${userNumber} ${dataTypes[dataType] || dataType}`);
-        }
-    },
-
-    // Resultado final con JSON completo - FORMATO CHROME
-    queryComplete: (dni, responseTime, success = true, data = null) => {
-        const timestamp = getTimestampAlways();
-        const userNumber = getUserNumber(dni);
-        
-        if (success && data) {
-            console.log(`${timestamp}User ${userNumber} Consulta completada (${formatDuration(responseTime)})`);
-            console.log(`${timestamp}User ${userNumber} Resultado JSON:`);
-            
-            // Mostrar el JSON formateado como en Chrome
-            try {
-                const jsonOutput = JSON.stringify(data, null, 2);
-                // Dividir en líneas y agregar timestamp a cada línea
-                const lines = jsonOutput.split('\n');
-                lines.forEach(line => {
-                    if (line.trim()) {
-                        console.log(`${timestamp}${line}`);
-                    }
-                });
-            } catch (error) {
-                console.log(`${timestamp}User ${userNumber} Error formateando JSON: ${error.message}`);
-            }
-            
-            console.log(`${timestamp}User ${userNumber} ===== FIN CONSULTA =====`);
-        } else if (success) {
-            console.log(`${timestamp}User ${userNumber} Consulta completada (${formatDuration(responseTime)})`);
+            const cacheTag = fromCache ? ` ${C.cyan}[CACHE]${C.reset}` : '';
+            console.log(`${ts()}${PREFIX.OK}${C.bold}User ${pad(user, 3)}${C.reset}completado en ${C.green}${duration}${C.reset}${cacheTag}`);
         } else {
-            console.log(`${timestamp}User ${userNumber} Error en consulta (${formatDuration(responseTime)})`);
+            console.log(`${ts()}${PREFIX.ERROR}${C.bold}User ${pad(user, 3)}${C.reset}${C.red}Error en consulta${C.reset} (${duration})`);
         }
     },
 
-    // Errores - SOLO SI SON IMPORTANTES
-    error: (message, details = {}) => {
-        const timestamp = getTimestampAlways();
-        const userNumber = details.dni ? getUserNumber(details.dni) : null;
-        const userInfo = userNumber ? ` User ${userNumber}` : '';
-        console.log(`${timestamp}ERROR${userInfo} ${message}`);
-    },
+    // Silenciado en producción — demasiado ruido mostrar cada sub-endpoint
+    dataCapture: () => {},
 
-    // Advertencias - SOLO SI SON IMPORTANTES
-    warn: (message, details = {}) => {
-        const timestamp = getTimestampAlways();
-        const userNumber = details.dni ? getUserNumber(details.dni) : null;
-        const userInfo = userNumber ? ` User ${userNumber}` : '';
-        console.log(`${timestamp}AVISO${userInfo} ${message}`);
-    },
+    loadingProgress: () => {},
 
-    // Keep-alive - MINIMALISTA
     keepAlive: (message, details = {}) => {
-        const timestamp = getTimestampAlways();
-        console.log(`${timestamp}KEEP-ALIVE ${message}`);
+        const extra = details.timeLeft ? ` ${C.dim}(${details.timeLeft})${C.reset}` : '';
+        console.log(`${ts()}${PREFIX.KEEPALIVE} ${message}${extra}`);
     },
 
-    // Estadísticas - MINIMALISTA
     stats: (message, details = {}) => {
-        const timestamp = getTimestampAlways();
-        let line = `${timestamp}STATS ${message}`;
-        
-        if (details.successRate) {
-            line += ` Exito: ${details.successRate}`;
-        }
-        if (details.avgTime) {
-            line += ` Promedio: ${details.avgTime}`;
-        }
-        if (details.total) {
-            line += ` Total: ${details.total}`;
-        }
-        
-        console.log(line);
+        const parts = [];
+        if (details.successRate) parts.push(`Éxito: ${C.green}${details.successRate}${C.reset}`);
+        if (details.avgTime)     parts.push(`Promedio: ${C.yellow}${details.avgTime}${C.reset}`);
+        if (details.total)       parts.push(`Total: ${C.bold}${details.total}${C.reset}`);
+        if (details.perHour)     parts.push(`${C.dim}${details.perHour}/h${C.reset}`);
+        if (details.cacheHits !== undefined) parts.push(`Cache hits: ${C.cyan}${details.cacheHits}${C.reset}`);
+        if (details.cacheSize !== undefined) parts.push(`Cache DNIs: ${C.cyan}${details.cacheSize}${C.reset}`);
+        if (details.memRss   !== undefined)  parts.push(`RAM: ${C.yellow}${details.memRss}MB${C.reset}${C.dim} (heap ${details.memHeap}MB)${C.reset}`);
+        if (details.pages    !== undefined)  parts.push(`Chrome: ${C.yellow}${details.pages} páginas${C.reset}`);
+        console.log(`${ts()}${PREFIX.STATS}${parts.join('  ')}`);
     },
 
-    // Separador - MINIMALISTA
+    error: (message, details = {}) => {
+        const user = details.dni ? ` User ${getUserNumber(details.dni)}` : '';
+        const extra = details.error ? ` ${C.dim}→ ${details.error}${C.reset}` : '';
+        console.log(`${ts()}${PREFIX.ERROR}${C.red}${message}${user}${C.reset}${extra}`);
+    },
+
+    warn: (message, details = {}) => {
+        const user = details.dni ? ` User ${getUserNumber(details.dni)}` : '';
+        console.log(`${ts()}${PREFIX.WARN}${message}${user}`);
+    },
+
     separator: (title = '') => {
         if (title) {
-            const timestamp = getTimestampAlways();
-            console.log(`${timestamp}${title}`);
+            console.log(`${ts()}${C.bold}${C.cyan}━━━ ${title} ━━━${C.reset}`);
         }
     },
 
-    // Métodos que NO muestran nada (para silenciar logs innecesarios)
-    loadingProgress: () => {}, // Silenciado
-    
-    // Método genérico - MINIMALISTA
-    info: (message, details = {}) => {
-        if (message.includes('Servidor') && message.includes('iniciado')) {
-            consoleLogger.system(message, details);
-        } else if (message.includes('Token capturado')) {
-            consoleLogger.auth(message, details);
+    // Compatibilidad con llamadas legacy
+    info: (message) => {
+        if (message.includes('Token capturado')) {
+            consoleLogger.auth(message);
         } else if (message.includes('Keep-alive')) {
-            consoleLogger.keepAlive(message, details);
+            consoleLogger.keepAlive(message);
         }
-        // Todo lo demás se silencia
     },
 
-    // Métodos legacy para compatibilidad - SILENCIADOS O MINIMALISTAS
     query: (message, details = {}) => {
-        if (message.includes('Nueva consulta iniciada')) {
-            consoleLogger.queryStart(details.dni);
-        } else if (message.includes('completada exitosamente')) {
+        if (message.includes('completada')) {
             consoleLogger.queryComplete(details.dni, details.responseTime, true);
         } else if (message.includes('error') || message.includes('Error')) {
             consoleLogger.queryComplete(details.dni, details.responseTime, false);
         }
     },
 
-    dataProgress: (message, details = {}) => {
-        if (details.dataType) {
-            
-            consoleLogger.dataCapture(details.dni, dataTypeMap[details.dataType] || 'unknown', true);
-        }
-    }
+    dataProgress: () => {}
 };
 
-module.exports = { logger, consoleLogger, getUserNumber, cleanOldUsers };
+module.exports = { logger, consoleLogger, getUserNumber };

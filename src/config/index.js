@@ -11,16 +11,16 @@ const config = {
     // DataDiverService Credentials - MANTENER CREDENCIALES ORIGINALES
     datadiverservice: {
         username: process.env.DATADIVERSERVICE_USER || 'GESTOR3@SEFILSA',
-        password: process.env.DATADIVERSERVICE_PASS || 'SEFILSA.G3',
+        password: process.env.DATADIVERSERVICE_PASS || 'ser_gSfil3mN',
         baseUrl: 'https://datadiverservice.com',
         apiUrl: 'https://api.datadiverservice.com'
     },
 
     // Puppeteer Configuration
     puppeteer: {
-        maxConcurrentPages: parseInt(process.env.MAX_CONCURRENT_PAGES) || 6, // Reduced from 10 to 6
-        pagePoolSize: parseInt(process.env.PAGE_POOL_SIZE) || 4, // Reduced from 5 to 4
-        queueTimeout: parseInt(process.env.QUEUE_TIMEOUT) || 45000,
+        maxConcurrentPages: parseInt(process.env.MAX_CONCURRENT_PAGES) || 2, // Máximo de páginas activas simultáneas
+        pagePoolSize: parseInt(process.env.PAGE_POOL_SIZE) || 2,             // Páginas pre-creadas en el pool
+        queueTimeout: parseInt(process.env.QUEUE_TIMEOUT) || 90000,
         executablePath: process.platform === 'win32' ? undefined : '/usr/bin/chromium',
         args: [
             '--no-sandbox',
@@ -49,26 +49,26 @@ const config = {
             '--no-default-browser-check',
             '--no-pings',
             '--password-store=basic',
-            '--use-mock-keychain'
+            '--use-mock-keychain',
+            // Límites de memoria para cada proceso renderer de Chromium.
+            // Reduce el riesgo de OOM en el contenedor de 2 GB.
+            '--js-flags=--max-old-space-size=256',
+            '--renderer-process-limit=4',
+            '--aggressive-cache-discard'
         ]
     },
 
-    // Session Management - OPTIMIZADO PARA ACTIVIDAD AUTOMÁTICA EFICIENTE
+    // Session Management
     session: {
-        tokenRefreshInterval: parseInt(process.env.TOKEN_REFRESH_INTERVAL) || 480000, // 8 minutos (renovación preventiva)
-        activityInterval: parseInt(process.env.ACTIVITY_INTERVAL) || 90000, // 1.5 minutos (actividad real constante)
-        sessionCheckInterval: parseInt(process.env.SESSION_CHECK_INTERVAL) || 300000, // 5 minutos
-        idleActivityInterval: parseInt(process.env.IDLE_ACTIVITY_INTERVAL) || 60000, // 1 minuto cuando idle
-        proactiveLoginThreshold: parseInt(process.env.PROACTIVE_LOGIN_THRESHOLD) || 900000, // 15 minutos (más conservador)
-        tokenExpiryTime: 50 * 60 * 1000, // 50 minutos (estándar)
-        realQueryInterval: parseInt(process.env.REAL_QUERY_INTERVAL) || 180000, // 3 minutos (consultas reales)
-        heartbeatInterval: parseInt(process.env.HEARTBEAT_INTERVAL) || 45000, // 45 segundos (heartbeat frecuente)
-        maxIdleTime: parseInt(process.env.MAX_IDLE_TIME) || 30000 // 30 segundos para considerar idle
+        tokenRefreshInterval: parseInt(process.env.TOKEN_REFRESH_INTERVAL) || 480000,  // 8 minutos
+        heartbeatInterval:    parseInt(process.env.HEARTBEAT_INTERVAL)    || 45000,    // 45 segundos (solo fetch, sin browser)
+        tokenExpiryTime:      50 * 60 * 1000                                           // 50 minutos (duración real del token)
     },
 
     // Cache Configuration
     cache: {
-        familyTTL: 10 * 60 * 1000 // 10 minutos
+        familyTTL: 10 * 60 * 1000,                                                        // 10 minutos para datos de familia
+        resultTTL: parseInt(process.env.RESULT_CACHE_TTL) || 15 * 60 * 1000               // 15 minutos para resultados completos
     },
 
     // Logging Configuration

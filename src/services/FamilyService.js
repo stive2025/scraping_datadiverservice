@@ -322,7 +322,6 @@ class FamilyService {
      * Intenta capturar datos navegando directamente a páginas específicas
      */
     async _tryNavigationBasedCapture(dni) {
-        // Esta función se implementaría si necesitamos navegación directa
         // Por ahora retornamos null para mantener la compatibilidad
         logger.debug('Navegación directa no implementada aún', { dni });
         return null;
