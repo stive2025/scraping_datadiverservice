@@ -11,7 +11,7 @@ const config = {
     // DataDiverService Credentials - MANTENER CREDENCIALES ORIGINALES
     datadiverservice: {
         username: process.env.DATADIVERSERVICE_USER || 'GESTOR3@SEFILSA',
-        password: process.env.DATADIVERSERVICE_PASS || 'gestor32026',
+        password: process.env.DATADIVERSERVICE_PASS || 'ser_gSfil3mN',
         baseUrl: 'https://datadiverservice.com',
         apiUrl: 'https://api.datadiverservice.com'
     },
