@@ -1,7 +1,14 @@
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 const { logger, consoleLogger } = require('../utils/logger');
 const config = require('../config');
-const { delay } = require('../utils/helpers');
+
+// User-Agent unificado para todo el servicio
+const CHROME_USER_AGENT =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 class BrowserService {
     constructor() {
@@ -66,25 +73,50 @@ class BrowserService {
     async createOptimizedPage() {
         const page = await this.browser.newPage();
 
-        // User-Agent de Chrome real en Windows
-        await page.setUserAgent(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        );
+        // User-Agent unificado Chrome/124
+        await page.setUserAgent(CHROME_USER_AGENT);
 
         // Viewport realista
         await page.setViewport({ width: 1366, height: 768 });
 
-        // Ocultar la bandera webdriver antes de que cargue cualquier script
+        // El stealth plugin ya oculta webdriver y muchas otras señales.
+        // Añadimos encima los detalles que el plugin no cubre por defecto.
         await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            // Simular plugins básicos
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
+            // window.chrome: ausente en headless puro — los bots lo detectan
+            if (!window.chrome) {
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
+                };
+            }
+
+            // Plugins realistas (objetos Plugin, no números)
+            const makePlugin = (name, filename, desc) => ({
+                name, filename, description: desc,
+                length: 0, item: () => null, namedItem: () => null
             });
+            const pluginList = [
+                makePlugin('Chrome PDF Plugin',  'internal-pdf-viewer',          'Portable Document Format'),
+                makePlugin('Chrome PDF Viewer',  'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
+                makePlugin('Native Client',      'internal-nacl-plugin',         '')
+            ];
+            pluginList.item      = (i) => pluginList[i] || null;
+            pluginList.namedItem = (n) => pluginList.find(p => p.name === n) || null;
+            pluginList.refresh   = () => {};
+            Object.defineProperty(navigator, 'plugins', { get: () => pluginList });
+
+            // Idiomas del navegador
             Object.defineProperty(navigator, 'languages', {
                 get: () => ['es-EC', 'es', 'en-US', 'en']
             });
+
+            // Hardware concurrency realista
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
+
+            // deviceMemory (GB)
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
         });
 
         await page.setDefaultNavigationTimeout(25000);

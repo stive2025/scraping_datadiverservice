@@ -1,4 +1,5 @@
 const express = require('express');
+const { rateLimit } = require('express-rate-limit');
 const config = require('./config');
 const { logger, consoleLogger } = require('./utils/logger');
 const createRoutes = require('./routes');
@@ -91,6 +92,16 @@ class Application {
      * Configura middleware global
      */
     setupMiddleware() {
+        // Máximo 60 peticiones por minuto por IP — protege contra abuso y sobrecarga
+        const limiter = rateLimit({
+            windowMs: 60 * 1000,
+            max: 60,
+            standardHeaders: true,
+            legacyHeaders: false,
+            message: { success: false, error: 'Demasiadas solicitudes, intenta en un minuto.' }
+        });
+        this.app.use(limiter);
+
         this.app.use((req, res, next) => {
             const start = Date.now();
             res.on('finish', () => {
@@ -129,6 +140,9 @@ class Application {
             this.server = this.app.listen(config.server.port, config.server.host, () => {
                 consoleLogger.separator('DATADIVERSERVICE SCRAPER');
                 consoleLogger.system(`Servidor iniciado en puerto ${config.server.port}`);
+                if (!process.env.API_KEY) {
+                    logger.warn('ADVERTENCIA: API_KEY no definida en .env — el servidor está abierto sin autenticación');
+                }
             });
 
             this.setupGracefulShutdown();

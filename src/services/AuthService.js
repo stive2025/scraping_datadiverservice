@@ -2,6 +2,11 @@ const { logger, consoleLogger } = require('../utils/logger');
 const config = require('../config');
 const { delay } = require('../utils/helpers');
 
+// Mismo UA que BrowserService — deben ser idénticos en toda la sesión
+const CHROME_USER_AGENT =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
 /**
  * AuthService — gestiona autenticación híbrida.
  *
@@ -21,13 +26,28 @@ class AuthService {
     /**
      * Realiza login con mutex para evitar logins concurrentes.
      */
-    async performLogin() {
+    async performLogin(maxRetries = 3) {
         if (this._loginMutex) {
             logger.info('Login en curso, esperando resultado compartido...');
             return this._loginMutex;
         }
 
-        this._loginMutex = this._doLogin().finally(() => {
+        this._loginMutex = (async () => {
+            let lastError;
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    await this._doLogin();
+                    return;
+                } catch (err) {
+                    lastError = err;
+                    logger.warn(`Login fallido (intento ${attempt}/${maxRetries})`, { error: err.message });
+                    if (attempt < maxRetries) {
+                        await delay(3000 * attempt); // espera 3s, 6s entre reintentos
+                    }
+                }
+            }
+            throw lastError;
+        })().finally(() => {
             this._loginMutex = null;
         });
 
@@ -141,13 +161,13 @@ class AuthService {
             'Content-Type':       'application/json',
             'Origin':             config.datadiverservice.baseUrl,
             'Referer':            `${config.datadiverservice.baseUrl}/`,
-            'Sec-Ch-Ua':          '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+            'Sec-Ch-Ua':          '"Not-A.Brand";v="99", "Google Chrome";v="124", "Chromium";v="124"',
             'Sec-Ch-Ua-Mobile':   '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
             'Sec-Fetch-Dest':     'empty',
             'Sec-Fetch-Mode':     'cors',
             'Sec-Fetch-Site':     'same-site',
-            'User-Agent':         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
+            'User-Agent':         CHROME_USER_AGENT
         };
     }
 
