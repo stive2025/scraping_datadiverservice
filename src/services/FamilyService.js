@@ -21,12 +21,6 @@ class FamilyService {
             return cached.data;
         }
 
-        // Verificar si hemos fallado recientemente con este DNI
-        const failedAttempt = this.failedAttempts.get(dni);
-        if (failedAttempt && (Date.now() - failedAttempt.timestamp) < 60000) { // 1 minuto
-            logger.debug('DNI falló recientemente, aplicando estrategia de doble consulta', { dni });
-        }
-
         let combinedFamilyData = { family: [], data: [], results: [], relatives: [], parentesco: [] };
         let totalMembers = 0;
 
@@ -319,15 +313,6 @@ class FamilyService {
     }
 
     /**
-     * Intenta capturar datos navegando directamente a páginas específicas
-     */
-    async _tryNavigationBasedCapture(dni) {
-        // Por ahora retornamos null para mantener la compatibilidad
-        logger.debug('Navegación directa no implementada aún', { dni });
-        return null;
-    }
-
-    /**
      * Combina datos de diferentes estructuras con más variaciones
      */
     _combineData(combinedData, data) {
@@ -409,26 +394,17 @@ class FamilyService {
             if (!combinedData[key]) return;
             
             combinedData[key] = combinedData[key].filter(member => {
-                // Múltiples formas de identificar duplicados
                 const memberDni = member.dni || member.identification || member.cedula || member.identificacion;
                 const memberName = member.fullname || member.name || member.nombre;
-                const memberAge = member.age || member.edad;
-                const memberGender = member.gender || member.genero || member.sexo;
-                
-                // Crear identificador compuesto
-                const identifiers = [
-                    memberDni,
-                    memberName,
-                    memberDni && memberName ? `${memberDni}-${memberName}` : null,
-                    memberName && memberAge ? `${memberName}-${memberAge}` : null,
-                    memberName && memberGender ? `${memberName}-${memberGender}` : null
-                ].filter(Boolean);
-                
-                // Si algún identificador ya existe, es duplicado
-                const isDuplicate = identifiers.some(id => seenIdentifiers.has(id));
+                const memberBirth = member.dateOfBirth || member.birthDate || member.fechaNacimiento || '';
+
+                // Identificador compuesto DNI+nombre+nacimiento para no eliminar
+                // hijos menores que comparten cédula del padre y nombre genérico
+                const identifier = `${memberDni || ''}-${memberName || ''}-${memberBirth}`;
+                const isDuplicate = seenIdentifiers.has(identifier);
                 
                 if (!isDuplicate) {
-                    identifiers.forEach(id => seenIdentifiers.add(id));
+                    seenIdentifiers.add(identifier);
                     return true;
                 }
                 

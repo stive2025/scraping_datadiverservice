@@ -256,8 +256,11 @@ class DataTransformService {
         return members.filter(member => {
             const memberDni = member.dni || member.identification || member.cedula;
             const memberName = member.fullname || member.name || member.nombre;
-            const identifier = memberDni || memberName || JSON.stringify(member);
-            
+            const memberBirth = member.dateOfBirth || member.birthDate || member.fechaNacimiento || '';
+            // Usar combinación DNI+nombre+nacimiento para no eliminar hijos menores
+            // que comparten la cédula del padre y el mismo nombre genérico
+            const identifier = `${memberDni || ''}-${memberName || ''}-${memberBirth}`;
+
             if (seenMembers.has(identifier)) {
                 return false;
             }

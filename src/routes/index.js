@@ -3,8 +3,34 @@ const ScrapingController = require('../controllers/ScrapingController');
 const SystemController = require('../controllers/SystemController');
 const FamilyController = require('../controllers/FamilyController');
 
+/**
+ * Middleware de API Key.
+ * El cliente debe enviar el header: X-API-Key: <valor de API_KEY en .env>
+ * Si no está configurada la variable de entorno, el acceso queda abierto con una advertencia.
+ */
+function apiKeyMiddleware(req, res, next) {
+    const expectedKey = process.env.API_KEY;
+
+    // Si no está configurada la API_KEY, dejamos pasar pero avisamos en cada arranque (ver app.js)
+    if (!expectedKey) {
+        return next();
+    }
+
+    const providedKey = req.headers['x-api-key'];
+    if (!providedKey || providedKey !== expectedKey) {
+        return res.status(401).json({ success: false, error: 'API Key inválida o ausente.' });
+    }
+    next();
+}
+
 function createRoutes(services) {
     const router = express.Router();
+
+    // Proteger todas las rutas con API Key (excepto /ping que sirve como health check público)
+    router.use((req, res, next) => {
+        if (req.path === '/ping') return next();
+        apiKeyMiddleware(req, res, next);
+    });
     
     // Inicializar controladores
     const scrapingController = new ScrapingController(services.scrapingService);
