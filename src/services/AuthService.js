@@ -97,7 +97,10 @@ class AuthService {
                 timeout: 20000
             });
 
-            await loginPage.waitForSelector('input#mat-input-0', { timeout: 8000 });
+            await loginPage.waitForSelector('input#mat-input-0', { timeout: 12000 });
+
+            // Dar tiempo a reCAPTCHA v3 para inicializarse antes de interactuar
+            await delay(3000 + Math.random() * 1000);
 
             // Rellenar credenciales con delays humanos
             await loginPage.click('input#mat-input-0');
@@ -112,10 +115,10 @@ class AuthService {
             await delay(400 + Math.random() * 200);
             await loginPage.click('button#kt_login_signin_submit');
 
-            // Esperar a que llegue el Bearer token (máx 15s)
+            // Esperar a que llegue el Bearer token (máx 30s — reCAPTCHA v3 necesita tiempo)
             const token = await Promise.race([
                 tokenPromise,
-                new Promise((_, rej) => setTimeout(() => rej(new Error('Token no capturado en 15s')), 15000))
+                new Promise((_, rej) => setTimeout(() => rej(new Error('Token no capturado en 30s')), 30000))
             ]);
 
             this._accessToken = token;
