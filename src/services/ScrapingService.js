@@ -146,7 +146,8 @@ class ScrapingService {
                         id: apiData.general.id || null
                     },
                     info_contacts: this._mapContactData(apiData.contact),
-                    info_family
+                    info_family,
+                    info_labour: apiData.labour || null
                 };
 
                 this.stats.successfulRequests++;
