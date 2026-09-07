@@ -59,16 +59,12 @@ class DataTransformService {
         // Transformar información laboral
         structured.works = this._transformWorks(labour, structured.id, now);
 
-        // Completar campos económicos del nivel raíz si el endpoint laboral los trae
+        // Completar campos económicos del nivel raíz a partir de la info laboral
         const labourSummary = this._extractLabourSummary(labour);
         if (labourSummary) {
             structured.economic_activity = structured.economic_activity || labourSummary.economic_activity || null;
-            structured.economic_area     = structured.economic_area     || labourSummary.economic_area     || null;
-            if ((structured.salary === null || structured.salary === '0' || structured.salary === 0) && labourSummary.salary) {
+            if ((structured.salary === null || structured.salary === '0' || structured.salary === 0 || structured.salary === '') && labourSummary.salary) {
                 structured.salary = labourSummary.salary;
-            }
-            if (structured.micro_activa === null && labourSummary.micro_activa != null) {
-                structured.micro_activa = labourSummary.micro_activa;
             }
         }
 
@@ -172,135 +168,104 @@ class DataTransformService {
     }
 
     /**
-     * Transforma la información laboral al array `works`.
+     * Transforma la información laboral (endpoint `labournew`) al array `works`.
      *
-     * El endpoint `labournew` puede devolver:
-     *   - un array de registros laborales
-     *   - un objeto que envuelve el array en .data / .results / .labour / .works / .history / .empleos
-     *   - un único objeto laboral
-     *
-     * Mapeo defensivo: se aceptan varios nombres de campo posibles (ES/EN) porque
-     * la forma exacta del payload aún no está documentada. Ajustar cuando se
-     * confirme con el log temporal "RAW labour payload".
+     * El payload trae tres listas, que aquí se unifican en un solo array con un
+     * campo `type` que indica el origen:
+     *   - ownInfoCompany     → NEGOCIO_PROPIO   (RUC personal / persona natural, datos SRI)
+     *   - jobInfoCompany     → RELACION_DEPENDENCIA (empleo con patrono, datos IESS)
+     *   - societyInfoCompany → SOCIEDAD          (empresa donde es socio/representante)
      */
     static _transformWorks(labour, clientId, now) {
-        const records = this._extractLabourRecords(labour);
-        if (records.length === 0) return [];
+        if (!labour || typeof labour !== 'object' || Array.isArray(labour)) return [];
+
+        const groups = [
+            { key: 'ownInfoCompany',     type: 'NEGOCIO_PROPIO' },
+            { key: 'jobInfoCompany',     type: 'RELACION_DEPENDENCIA' },
+            { key: 'societyInfoCompany', type: 'SOCIEDAD' }
+        ];
+
+        const clean = v => (v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : null);
+        // Actividad económica: descartar códigos de una sola letra ("C") que no son descripciones
+        const cleanActivity = v => {
+            const c = clean(v);
+            return c && c.length > 1 ? c : null;
+        };
+        const toDate = v => {
+            const c = clean(v);
+            return c ? (convertDateFormat(c) || c) : null;
+        };
 
         const seen = new Set();
-        return records
-            .map(rec => {
-                if (!rec || typeof rec !== 'object') return null;
+        const works = [];
 
-                const pick = (...keys) => {
-                    for (const k of keys) {
-                        const v = rec[k];
-                        if (v !== undefined && v !== null && String(v).trim() !== '') return v;
-                    }
-                    return null;
-                };
+        for (const { key, type } of groups) {
+            const list = Array.isArray(labour[key]) ? labour[key] : [];
+            for (const rec of list) {
+                if (!rec || typeof rec !== 'object') continue;
 
-                const company = pick(
-                    'company', 'employer', 'empresa', 'razonSocial', 'razon_social',
-                    'nombreEmpresa', 'nombre_empresa', 'patrono', 'empleador', 'institucion'
-                );
-                const ruc = pick('ruc', 'rucEmpresa', 'ruc_empresa', 'employerRuc', 'identificacionPatrono');
-                const position = pick(
-                    'position', 'cargo', 'puesto', 'occupation', 'ocupacion',
-                    'denominacionCargo', 'jobTitle', 'rol'
-                );
-                const startRaw = pick(
-                    'startDate', 'start_date', 'fechaIngreso', 'fecha_ingreso',
-                    'fechaAfiliacion', 'fecha_afiliacion', 'admissionDate', 'desde', 'fechaDesde'
-                );
-                const endRaw = pick(
-                    'endDate', 'end_date', 'fechaSalida', 'fecha_salida',
-                    'fechaCesacion', 'fecha_cesacion', 'exitDate', 'hasta', 'fechaHasta'
-                );
-                const salary = pick(
-                    'salary', 'sueldo', 'salario', 'remuneracion', 'wage',
-                    'ingreso', 'sueldoMensual', 'monto'
-                );
-                const status = pick(
-                    'status', 'estado', 'situation', 'situacion', 'estadoAfiliacion',
-                    'condicion', 'relacionLaboral'
-                );
-                const sector = pick('sector', 'tipo', 'type', 'tipoEmpleo', 'tipo_empleo', 'regimen');
-                const economicActivity = pick(
-                    'economicActivity', 'economic_activity', 'actividadEconomica',
-                    'actividad_economica', 'activity', 'actividad'
-                );
+                const company = clean(rec.legalName) || clean(rec.businessName) || null;
+                const ruc = clean(rec.ruc);
+                const position = clean(rec.position);
 
-                const identifier = [
-                    (company || '').toString().trim().toLowerCase(),
-                    (ruc || '').toString().trim(),
-                    (startRaw || '').toString().trim(),
-                    (position || '').toString().trim().toLowerCase()
-                ].join('|');
-                if (identifier === '|||' || seen.has(identifier)) return null;
+                const identifier = [type, (ruc || ''), (company || '').toLowerCase(), (position || '').toLowerCase()].join('|');
+                if (seen.has(identifier)) continue;
                 seen.add(identifier);
 
-                return {
+                works.push({
                     id: null,
                     client_id: clientId,
-                    company: company || null,
-                    ruc: ruc || null,
-                    position: position || null,
-                    sector: sector || null,
-                    economic_activity: economicActivity || null,
-                    salary: salary != null ? String(salary) : null,
-                    status: status || null,
-                    start_date: convertDateFormat(startRaw != null ? String(startRaw) : null) || (startRaw != null ? String(startRaw) : null),
-                    end_date: convertDateFormat(endRaw != null ? String(endRaw) : null) || (endRaw != null ? String(endRaw) : null),
+                    type,
+                    company,
+                    ruc,
+                    position,
+                    salary: clean(rec.salary),
+                    economic_activity: cleanActivity(rec.economicActivity),
+                    address: clean(rec.address),
+                    province: clean(rec.province),
+                    phone: clean(rec.phone),
+                    email: clean(rec.email),
+                    taxpayer_status: clean(rec.taxpayerStatus),
+                    branch_office: clean(rec.codeBranchOffice),
+                    // Fecha de inicio: ingreso al empleo o inicio de actividades del RUC
+                    start_date: toDate(rec.admissionDate) || toDate(rec.activitiesStartDate),
+                    // Fecha de fin: salida del empleo o suspensión de actividades del RUC
+                    end_date: toDate(rec.fireDate) || toDate(rec.suspensionRequestDate),
+                    restart_date: toDate(rec.activitiesRestartDate),
                     created_at: now,
                     updated_at: now
-                };
-            })
-            .filter(Boolean);
+                });
+            }
+        }
+
+        return works;
     }
 
     /**
-     * Normaliza el payload laboral a un array de registros.
-     */
-    static _extractLabourRecords(labour) {
-        if (!labour) return [];
-        if (Array.isArray(labour)) return labour;
-        if (typeof labour !== 'object') return [];
-
-        for (const key of ['data', 'results', 'labour', 'labor', 'works', 'history', 'historial', 'empleos', 'trabajos', 'records', 'items']) {
-            if (Array.isArray(labour[key]) && labour[key].length > 0) return labour[key];
-        }
-
-        // Objeto laboral único: lo devolvemos como array de un elemento si parece un registro
-        const keys = Object.keys(labour);
-        if (keys.length > 0 && keys.some(k => /empresa|company|cargo|position|sueldo|salary|patrono|empleador/i.test(k))) {
-            return [labour];
-        }
-        return [];
-    }
-
-    /**
-     * Extrae campos económicos de resumen del payload laboral, si vienen a nivel raíz.
+     * Extrae actividad económica y sueldo del payload laboral para completar
+     * los campos del nivel raíz del objeto principal.
      */
     static _extractLabourSummary(labour) {
         if (!labour || typeof labour !== 'object' || Array.isArray(labour)) return null;
 
-        const pick = (...keys) => {
-            for (const k of keys) {
-                const v = labour[k];
-                if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+        const clean = v => (v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : null);
+        const firstOf = (list, field) => {
+            if (!Array.isArray(list)) return null;
+            for (const rec of list) {
+                const v = rec && clean(rec[field]);
+                // Ignorar códigos de una sola letra ("C") que no son descripciones
+                if (v && v.length > 1) return v;
             }
             return null;
         };
 
         const summary = {
-            economic_activity: pick('economicActivity', 'economic_activity', 'actividadEconomica', 'actividad_economica'),
-            economic_area:     pick('economicArea', 'economic_area', 'areaEconomica', 'area_economica', 'sector'),
-            salary:            pick('salary', 'sueldo', 'salario', 'remuneracion', 'ingresoMensual'),
-            micro_activa:      pick('microActiva', 'micro_activa', 'microempresa')
+            economic_activity: firstOf(labour.ownInfoCompany, 'economicActivity')
+                            || firstOf(labour.societyInfoCompany, 'economicActivity'),
+            salary: firstOf(labour.jobInfoCompany, 'salary')
         };
 
-        return Object.values(summary).some(v => v != null) ? summary : null;
+        return (summary.economic_activity || summary.salary) ? summary : null;
     }
 
     /**

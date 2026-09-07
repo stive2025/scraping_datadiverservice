@@ -110,13 +110,6 @@ class HttpService {
 
         const labourData = getValue(labour, 'labournew');
 
-        // LOG TEMPORAL — para descubrir la forma real del payload laboral.
-        // Quitar una vez mapeado en DataTransformService._transformWorks.
-        console.log(`\n===== RAW labour payload (dni ${dni}) =====`);
-        console.log(JSON.stringify(labourData, null, 2));
-        console.log('===== fin RAW labour payload =====\n');
-        logger.info('RAW labour payload', { dni, labour: labourData });
-
         // Para familia: usar el endpoint que devuelva datos (family/new tiene prioridad)
         const familyData = getValue(familyNew, 'family/new') || getValue(family, 'family');
         if (familyData) {
